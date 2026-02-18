@@ -60,6 +60,9 @@ class QueueConfig:
     tank_per_team: int
     dps_per_team: int
     support_per_team: int
+    main_voice_channel_id: int | None
+    team_a_voice_channel_id: int | None
+    team_b_voice_channel_id: int | None
 
     @property
     def team_size(self) -> int:
@@ -83,3 +86,68 @@ class QueueConfig:
             "fill": self.fill_entries_cap_total,
         }
         return caps
+
+
+@dataclass(slots=True)
+class PlayerMatchEntry:
+    match_id: int
+    created_at: str
+    mode: str
+    team: str
+    assigned_role: str
+    mmr: int
+    result: str  # "win" | "loss" | "draw" | "unknown"
+
+
+@dataclass(slots=True)
+class PlayerStats:
+    discord_id: int
+    display_name: str
+    battletag: str | None
+    mmr: int
+    preferred_role: str
+    updated_at: str
+    queue_role: str | None
+    queue_joined_at: str | None
+    matches_played: int
+    last_match_at: str | None
+    wins: int
+    losses: int
+    draws: int
+    results_reported: int
+    no_show_count: int
+    disconnect_count: int
+    assigned_role_counts: dict[str, int]
+
+
+@dataclass(slots=True)
+class ActiveMatch:
+    match_id: int
+    channel_id: int
+    message_id: int
+    status: str  # waiting_vc | live | disputed
+    ready_deadline: str | None
+    started_at: str | None
+    team_a_voice_channel_id: int | None
+    team_b_voice_channel_id: int | None
+    escalated: bool
+
+
+@dataclass(slots=True)
+class MatchMmrChange:
+    match_id: int
+    discord_id: int
+    display_name: str
+    team: str
+    mmr_before: int
+    delta: int
+    mmr_after: int
+
+
+@dataclass(slots=True)
+class MatchCaptain:
+    match_id: int
+    captain_id: int
+    selected_by: int
+    selected_at: str
+    selection_method: str  # admin_auto | first_claim

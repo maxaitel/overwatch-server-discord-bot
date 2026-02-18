@@ -13,6 +13,10 @@ class Settings:
     database_path: str
     command_guild_id: int | None
     queue_channel_id: int | None
+    leaderboard_channel_id: int | None
+    main_voice_channel_id: int | None
+    team_a_voice_channel_id: int | None
+    team_b_voice_channel_id: int | None
     players_per_match: int
     tank_per_team: int
     dps_per_team: int
@@ -36,6 +40,18 @@ def load_settings() -> Settings:
     queue_channel_raw = os.getenv("QUEUE_CHANNEL_ID", "").strip()
     queue_channel_id = int(queue_channel_raw) if queue_channel_raw else None
 
+    leaderboard_channel_raw = os.getenv("LEADERBOARD_CHANNEL_ID", "").strip()
+    leaderboard_channel_id = int(leaderboard_channel_raw) if leaderboard_channel_raw else None
+
+    main_vc_raw = os.getenv("MAIN_VOICE_CHANNEL_ID", "").strip()
+    main_voice_channel_id = int(main_vc_raw) if main_vc_raw else None
+
+    team_a_vc_raw = os.getenv("TEAM_A_VOICE_CHANNEL_ID", "").strip()
+    team_a_voice_channel_id = int(team_a_vc_raw) if team_a_vc_raw else None
+
+    team_b_vc_raw = os.getenv("TEAM_B_VOICE_CHANNEL_ID", "").strip()
+    team_b_voice_channel_id = int(team_b_vc_raw) if team_b_vc_raw else None
+
     players_per_match = int(os.getenv("PLAYERS_PER_MATCH", os.getenv("QUEUE_SIZE", "10")))
     if players_per_match < 2 or players_per_match % 2 != 0:
         raise RuntimeError("PLAYERS_PER_MATCH must be an even number >= 2.")
@@ -55,8 +71,8 @@ def load_settings() -> Settings:
         )
 
     default_mmr = int(os.getenv("DEFAULT_MMR", "2500"))
-    if default_mmr < 1:
-        raise RuntimeError("DEFAULT_MMR must be positive.")
+    if default_mmr < 0 or default_mmr > 5000:
+        raise RuntimeError("DEFAULT_MMR must be between 0 and 5000.")
 
     default_role = os.getenv("DEFAULT_ROLE", "flex").strip().lower() or "flex"
     if default_role not in VALID_ROLES:
@@ -67,6 +83,10 @@ def load_settings() -> Settings:
         database_path=database_path,
         command_guild_id=command_guild_id,
         queue_channel_id=queue_channel_id,
+        leaderboard_channel_id=leaderboard_channel_id,
+        main_voice_channel_id=main_voice_channel_id,
+        team_a_voice_channel_id=team_a_voice_channel_id,
+        team_b_voice_channel_id=team_b_voice_channel_id,
         players_per_match=players_per_match,
         tank_per_team=tank_per_team,
         dps_per_team=dps_per_team,
