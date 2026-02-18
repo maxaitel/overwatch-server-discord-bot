@@ -1,0 +1,2 @@
+"""Overwatch Discord bot package."""
+
