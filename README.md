@@ -85,6 +85,39 @@ All slash commands are intended for admins (`Manage Server`):
    python -m src.main
    ```
 
+## Docker Deployment
+
+Use this when running on another machine with auto-restart behavior.
+
+1. Copy env file and fill values:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Start container:
+
+   ```bash
+   docker compose up -d --build
+   ```
+
+3. View logs:
+
+   ```bash
+   docker compose logs -f overwatch-bot
+   ```
+
+4. Stop:
+
+   ```bash
+   docker compose down
+   ```
+
+Notes:
+- Container restart policy is `unless-stopped`.
+- SQLite DB is persisted in Docker volume `overwatch_bot_data`.
+- `SQLITE_PATH` is set to `/data/bot.db` in compose.
+
 ## Environment Variables
 
 - `DISCORD_TOKEN` (required)

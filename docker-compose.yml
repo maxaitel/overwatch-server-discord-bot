@@ -1,0 +1,16 @@
+services:
+  overwatch-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: overwatch-discord-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      SQLITE_PATH: /data/bot.db
+    volumes:
+      - overwatch_bot_data:/data
+
+volumes:
+  overwatch_bot_data:
