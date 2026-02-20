@@ -1120,7 +1120,7 @@ class QueueService:
         if self.bot.user is None:
             return None
         try:
-            async for message in channel.history(limit=50):
+            async for message in channel.history(limit=200):
                 if message.author.id != self.bot.user.id:
                     continue
                 if message.content.startswith("In-House Leaderboard"):
@@ -1130,13 +1130,16 @@ class QueueService:
             return None
         return None
 
-    async def sync_leaderboard_image(self) -> None:
+    async def sync_leaderboard_image(self, *, force: bool = False) -> None:
         channel = await self._resolve_leaderboard_channel()
         if channel is None:
             return
 
-        payload = self._render_leaderboard_image(limit=10)
         existing = await self._find_existing_leaderboard_message(channel)
+        if existing is not None and not force:
+            return
+
+        payload = self._render_leaderboard_image(limit=10)
         if existing is not None:
             try:
                 await existing.delete()
@@ -1698,7 +1701,7 @@ class QueueService:
         self._active_match_updates.pop(match_id, None)
         self._vc_check_status.pop(match_id, None)
         self.bot.db.clear_active_match()
-        await self.sync_leaderboard_image()
+        await self.sync_leaderboard_image(force=True)
         await self._start_match_if_ready()
         if self.bot.db.get_active_match() is None:
             await self.sync_panel(repost=True)
@@ -2191,7 +2194,7 @@ class QueueService:
             if not applied and mmr_msg != "mmr already applied":
                 return True, f"Result saved, but MMR update failed: {mmr_msg}."
             if applied:
-                await self.sync_leaderboard_image()
+                await self.sync_leaderboard_image(force=True)
             if active and active.match_id != match_id:
                 return True, f"Result saved for archived match. Active match is `#{active.match_id}`."
             if applied:
@@ -2377,7 +2380,7 @@ class QueueService:
                     if applied:
                         mmr_applied += 1
             if mmr_applied > 0:
-                await self.sync_leaderboard_image()
+                await self.sync_leaderboard_image(force=True)
             return updated, len(matches), mmr_applied
 
     async def handle_queue_channel_message(self, message: discord.Message) -> None:

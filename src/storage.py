@@ -24,6 +24,9 @@ VALID_WINNER_TEAMS = {"Team A", "Team B", "Draw"}
 VALID_ACTIVE_MATCH_STATUSES = {"waiting_vc", "live", "disputed"}
 MIN_SR = 0
 MAX_SR = 5000
+DEFAULT_ELO_K_FACTOR = 24
+DEFAULT_CALIBRATION_MATCHES = 5
+DEFAULT_CALIBRATION_MULTIPLIER = 2.0
 _UNSET = object()
 
 
@@ -718,7 +721,9 @@ class Database:
         match_id: int,
         winner_team: str,
         *,
-        k_factor: int = 24,
+        k_factor: int = DEFAULT_ELO_K_FACTOR,
+        calibration_matches: int = DEFAULT_CALIBRATION_MATCHES,
+        calibration_multiplier: float = DEFAULT_CALIBRATION_MULTIPLIER,
     ) -> tuple[bool, list[MatchMmrChange], str]:
         if winner_team not in VALID_WINNER_TEAMS:
             return False, [], "invalid winner team"
@@ -762,6 +767,24 @@ class Database:
             "dps": "dps_mmr",
             "support": "support_mmr",
         }
+        prior_games: dict[int, int] = {}
+        for payload in (team_a_payload, team_b_payload):
+            for entry in payload:
+                try:
+                    discord_id = int(entry.get("discord_id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if discord_id <= 0 or discord_id in prior_games:
+                    continue
+                games_row = self.conn.execute(
+                    """
+                    SELECT COUNT(*) AS games_played
+                    FROM match_mmr_changes
+                    WHERE discord_id = ?
+                    """,
+                    (discord_id,),
+                ).fetchone()
+                prior_games[discord_id] = int(games_row["games_played"]) if games_row is not None else 0
 
         def _apply_team(team: str, payload: list[dict[str, object]], score: float, opponent_avg: int) -> None:
             for entry in payload:
@@ -819,7 +842,11 @@ class Database:
                     )
 
                 expected = self._expected_score(mmr_before, opponent_avg)
-                delta = int(round(k_factor * (score - expected)))
+                multiplier = 1.0
+                if calibration_matches > 0 and calibration_multiplier > 1.0:
+                    if prior_games.get(discord_id, 0) < calibration_matches:
+                        multiplier = calibration_multiplier
+                delta = int(round(k_factor * (score - expected) * multiplier))
                 mmr_after = self._clamp_sr(mmr_before + delta)
                 self.conn.execute(
                     """

@@ -36,6 +36,7 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - Leaderboard image auto-regenerates and reposts whenever match MMR updates.
 - Ready-check no-shows/disconnects are tracked per player in DB stats.
 - In role mode, `Fill` is a wildcard preference; fill players are assigned to missing Tank/DPS/Support slots during match creation.
+- New players get calibration MMR adjustments for their first 5 completed in-house matches (larger deltas), then normal Elo deltas apply.
 
 ## Admin Slash Commands
 
