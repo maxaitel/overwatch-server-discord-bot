@@ -15,7 +15,7 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - `Join Queue` (open queue mode)
   - `Leave Queue`
 - On first queue join, the bot asks the player for BattleTag and stores it.
-- If a user sends a message in the queue channel, the bot deletes that message and reposts the queue panel with the same state.
+- If a user sends a message in the queue channel, the bot keeps the message and reposts the queue panel with the same state so the panel stays at the bottom.
 - Modmail flow:
   - Users click `Open Ticket` on the modmail embed.
   - Bot creates private ticket threads (users can have multiple open tickets).

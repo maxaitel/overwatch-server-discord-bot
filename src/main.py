@@ -2444,14 +2444,10 @@ class QueueService:
                 await self.sync_leaderboard_image(force=True)
             return updated, len(matches), mmr_applied
 
-    async def handle_queue_channel_message(self, message: discord.Message) -> None:
+    async def handle_queue_channel_message(self, _message: discord.Message) -> None:
         if self._reposting:
             return
         async with self.lock:
-            try:
-                await message.delete()
-            except discord.DiscordException:
-                pass
             await self.sync_panel(repost=True)
 
 
