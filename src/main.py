@@ -1271,31 +1271,6 @@ class QueueService:
 
         raise ValueError("Unknown test scenario.")
 
-    def _role_need_status(
-        self,
-        role_counts: dict[str, int],
-        role_caps: dict[str, int],
-        fill_count: int,
-    ) -> tuple[dict[str, int], dict[str, int], int]:
-        raw_need = {
-            "tank": max(role_caps.get("tank", 0) - role_counts.get("tank", 0), 0),
-            "dps": max(role_caps.get("dps", 0) - role_counts.get("dps", 0), 0),
-            "support": max(role_caps.get("support", 0) - role_counts.get("support", 0), 0),
-        }
-        remaining_need = dict(raw_need)
-        fill_left = fill_count
-
-        # Apply fill coverage to the largest shortages first.
-        while fill_left > 0:
-            target_role = max(("tank", "dps", "support"), key=lambda role: remaining_need[role])
-            if remaining_need[target_role] <= 0:
-                break
-            remaining_need[target_role] -= 1
-            fill_left -= 1
-
-        covered_by_fill = fill_count - fill_left
-        return raw_need, remaining_need, covered_by_fill
-
     def build_embed(self, config: QueueConfig) -> discord.Embed:
         queued = self.bot.db.list_queue()
         total = len(queued)
@@ -1313,13 +1288,6 @@ class QueueService:
                 role_groups[role].append(player)
 
             caps = config.role_caps_total()
-            role_counts = {
-                "tank": len(role_groups["tank"]),
-                "dps": len(role_groups["dps"]),
-                "support": len(role_groups["support"]),
-            }
-            fill_count = len(role_groups["fill"])
-            _, remaining_need, _ = self._role_need_status(role_counts, caps, fill_count)
 
             embed.add_field(
                 name=f"Tank ({len(role_groups['tank'])}/{caps.get('tank', 0)})",
@@ -1339,13 +1307,6 @@ class QueueService:
             embed.add_field(
                 name=f"Fill ({len(role_groups['fill'])}/{caps.get('fill', config.players_per_match)})",
                 value=self._mention_list(role_groups["fill"]),
-                inline=False,
-            )
-            embed.add_field(
-                name="Missing Roles",
-                value=(
-                    f"Tank `{remaining_need['tank']}` | DPS `{remaining_need['dps']}` | Support `{remaining_need['support']}`"
-                ),
                 inline=False,
             )
         else:
