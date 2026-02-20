@@ -4,7 +4,19 @@ from datetime import datetime, timezone
 import json
 import sqlite3
 
-from .models import ActiveMatch, MatchCaptain, MatchMmrChange, Player, PlayerMatchEntry, PlayerStats, QueueConfig, QueuedPlayer, Team
+from .models import (
+    ActiveMatch,
+    MatchCaptain,
+    MatchMmrChange,
+    ModmailConfig,
+    ModmailTicket,
+    Player,
+    PlayerMatchEntry,
+    PlayerStats,
+    QueueConfig,
+    QueuedPlayer,
+    Team,
+)
 
 DEFAULT_QUEUE_MODE = "role"
 DEFAULT_QUEUE_STATE_KEY = "default"
@@ -41,8 +53,10 @@ class Database:
         self._create_schema()
         self._ensure_player_columns()
         self._ensure_queue_config_columns()
+        self._ensure_modmail_config_columns()
         self._normalize_queue_state()
         self._ensure_queue_config_row()
+        self._ensure_modmail_config_row()
         self._ensure_player_role_mmr_rows()
 
     def _clamp_sr(self, value: int) -> int:
@@ -200,6 +214,36 @@ class Database:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modmail_config (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    panel_channel_id INTEGER,
+                    panel_message_id INTEGER,
+                    logs_channel_id INTEGER
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS modmail_tickets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL UNIQUE,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    closed_by INTEGER
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_modmail_tickets_guild_user_status
+                ON modmail_tickets(guild_id, user_id, status)
+                """
+            )
 
     def _ensure_player_columns(self) -> None:
         columns = {
@@ -250,6 +294,20 @@ class Database:
                     """
                 )
 
+    def _ensure_modmail_config_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(modmail_config)").fetchall()
+        }
+        with self.conn:
+            if "logs_channel_id" not in columns:
+                self.conn.execute(
+                    """
+                    ALTER TABLE modmail_config
+                    ADD COLUMN logs_channel_id INTEGER
+                    """
+                )
+
     def _ensure_queue_config_row(self) -> None:
         with self.conn:
             self.conn.execute(
@@ -283,6 +341,17 @@ class Database:
                     None,
                     None,
                 ),
+            )
+
+    def _ensure_modmail_config_row(self) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO modmail_config (id, panel_channel_id, panel_message_id, logs_channel_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (1, None, None, None),
             )
 
     def _ensure_player_role_mmr_rows(self) -> None:
@@ -1272,6 +1341,154 @@ class Database:
                 """
             )
         return self.get_queue_config()
+
+    def get_modmail_config(self) -> ModmailConfig:
+        row = self.conn.execute(
+            """
+            SELECT panel_channel_id, panel_message_id, logs_channel_id
+            FROM modmail_config
+            WHERE id = 1
+            """
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Modmail config row is missing.")
+        return ModmailConfig(
+            panel_channel_id=row["panel_channel_id"],
+            panel_message_id=row["panel_message_id"],
+            logs_channel_id=row["logs_channel_id"],
+        )
+
+    def update_modmail_config(
+        self,
+        *,
+        panel_channel_id: int | None | object = _UNSET,
+        panel_message_id: int | None | object = _UNSET,
+        logs_channel_id: int | None | object = _UNSET,
+    ) -> ModmailConfig:
+        current = self.get_modmail_config()
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE modmail_config
+                SET panel_channel_id = ?,
+                    panel_message_id = ?,
+                    logs_channel_id = ?
+                WHERE id = 1
+                """,
+                (
+                    current.panel_channel_id if panel_channel_id is _UNSET else panel_channel_id,
+                    current.panel_message_id if panel_message_id is _UNSET else panel_message_id,
+                    current.logs_channel_id if logs_channel_id is _UNSET else logs_channel_id,
+                ),
+            )
+        return self.get_modmail_config()
+
+    def set_modmail_channel(self, channel_id: int) -> ModmailConfig:
+        return self.update_modmail_config(panel_channel_id=channel_id, panel_message_id=0)
+
+    def set_modmail_message(self, message_id: int) -> ModmailConfig:
+        return self.update_modmail_config(panel_message_id=message_id)
+
+    def clear_modmail_message(self) -> ModmailConfig:
+        return self.update_modmail_config(panel_message_id=0)
+
+    def set_modmail_logs_channel(self, channel_id: int) -> ModmailConfig:
+        return self.update_modmail_config(logs_channel_id=channel_id)
+
+    def _row_to_modmail_ticket(self, row: sqlite3.Row | None) -> ModmailTicket | None:
+        if row is None:
+            return None
+        return ModmailTicket(
+            ticket_id=int(row["id"]),
+            guild_id=int(row["guild_id"]),
+            user_id=int(row["user_id"]),
+            thread_id=int(row["thread_id"]),
+            status=str(row["status"]),
+            created_at=str(row["created_at"]),
+            closed_at=row["closed_at"],
+            closed_by=(int(row["closed_by"]) if row["closed_by"] is not None else None),
+        )
+
+    def get_open_modmail_ticket(self, guild_id: int, user_id: int) -> ModmailTicket | None:
+        row = self.conn.execute(
+            """
+            SELECT id, guild_id, user_id, thread_id, status, created_at, closed_at, closed_by
+            FROM modmail_tickets
+            WHERE guild_id = ?
+              AND user_id = ?
+              AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (guild_id, user_id),
+        ).fetchone()
+        return self._row_to_modmail_ticket(row)
+
+    def get_modmail_ticket_by_thread(self, thread_id: int) -> ModmailTicket | None:
+        row = self.conn.execute(
+            """
+            SELECT id, guild_id, user_id, thread_id, status, created_at, closed_at, closed_by
+            FROM modmail_tickets
+            WHERE thread_id = ?
+            LIMIT 1
+            """,
+            (thread_id,),
+        ).fetchone()
+        return self._row_to_modmail_ticket(row)
+
+    def create_modmail_ticket(self, *, guild_id: int, user_id: int, thread_id: int) -> ModmailTicket:
+        now = utc_now_iso()
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO modmail_tickets (guild_id, user_id, thread_id, status, created_at, closed_at, closed_by)
+                VALUES (?, ?, ?, 'open', ?, NULL, NULL)
+                """,
+                (guild_id, user_id, thread_id, now),
+            )
+        ticket = self.get_modmail_ticket_by_thread(thread_id)
+        if ticket is None:
+            raise RuntimeError(f"Failed to create modmail ticket: {cursor.lastrowid}")
+        return ticket
+
+    def close_open_modmail_tickets_for_user(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        closed_by: int | None,
+    ) -> int:
+        now = utc_now_iso()
+        with self.conn:
+            result = self.conn.execute(
+                """
+                UPDATE modmail_tickets
+                SET status = 'closed',
+                    closed_at = ?,
+                    closed_by = ?
+                WHERE guild_id = ?
+                  AND user_id = ?
+                  AND status = 'open'
+                """,
+                (now, closed_by, guild_id, user_id),
+            )
+        return result.rowcount
+
+    def close_modmail_ticket_by_thread(self, *, thread_id: int, closed_by: int | None) -> bool:
+        now = utc_now_iso()
+        with self.conn:
+            result = self.conn.execute(
+                """
+                UPDATE modmail_tickets
+                SET status = 'closed',
+                    closed_at = ?,
+                    closed_by = ?
+                WHERE thread_id = ?
+                  AND status = 'open'
+                """,
+                (now, closed_by, thread_id),
+            )
+        return result.rowcount > 0
 
     def get_queue_entry(self, discord_id: int) -> sqlite3.Row | None:
         return self.conn.execute(

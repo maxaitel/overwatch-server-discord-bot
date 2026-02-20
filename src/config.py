@@ -13,6 +13,8 @@ class Settings:
     database_path: str
     command_guild_id: int | None
     queue_channel_id: int | None
+    modmail_channel_id: int | None
+    modmail_logs_channel_id: int | None
     leaderboard_channel_id: int | None
     main_voice_channel_id: int | None
     team_a_voice_channel_id: int | None
@@ -39,6 +41,12 @@ def load_settings() -> Settings:
 
     queue_channel_raw = os.getenv("QUEUE_CHANNEL_ID", "").strip()
     queue_channel_id = int(queue_channel_raw) if queue_channel_raw else None
+
+    modmail_channel_raw = os.getenv("MODMAIL_CHANNEL_ID", "").strip()
+    modmail_channel_id = int(modmail_channel_raw) if modmail_channel_raw else None
+
+    modmail_logs_channel_raw = os.getenv("MODMAIL_LOGS_CHANNEL_ID", "").strip()
+    modmail_logs_channel_id = int(modmail_logs_channel_raw) if modmail_logs_channel_raw else None
 
     leaderboard_channel_raw = os.getenv("LEADERBOARD_CHANNEL_ID", "").strip()
     leaderboard_channel_id = int(leaderboard_channel_raw) if leaderboard_channel_raw else None
@@ -83,6 +91,8 @@ def load_settings() -> Settings:
         database_path=database_path,
         command_guild_id=command_guild_id,
         queue_channel_id=queue_channel_id,
+        modmail_channel_id=modmail_channel_id,
+        modmail_logs_channel_id=modmail_logs_channel_id,
         leaderboard_channel_id=leaderboard_channel_id,
         main_voice_channel_id=main_voice_channel_id,
         team_a_voice_channel_id=team_a_voice_channel_id,

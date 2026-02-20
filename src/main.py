@@ -13,7 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import Settings, load_settings
 from .matchmaking import make_match
-from .models import AssignedPlayer, MatchMmrChange, QueueConfig, QueuedPlayer, Team
+from .models import AssignedPlayer, MatchMmrChange, ModmailConfig, ModmailTicket, QueueConfig, QueuedPlayer, Team
 from .storage import Database
 
 
@@ -131,6 +131,11 @@ def _is_admin(interaction: discord.Interaction) -> bool:
     return bool(member and member.guild_permissions.manage_guild)
 
 
+def _is_ticket_staff(interaction: discord.Interaction) -> bool:
+    member = interaction.user if isinstance(interaction.user, discord.Member) else None
+    return bool(member and (member.guild_permissions.manage_guild or member.guild_permissions.manage_threads))
+
+
 class QueuePanelView(discord.ui.View):
     def __init__(self, bot: OverwatchBot, config: QueueConfig) -> None:
         super().__init__(timeout=None)
@@ -244,6 +249,350 @@ class BattleTagModal(discord.ui.Modal, title="Set BattleTag"):
             requested_role=self.requested_role,
             battletag=str(self.battletag).strip(),
         )
+
+
+class ModmailPanelView(discord.ui.View):
+    def __init__(self, bot: OverwatchBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, custom_id="modmail_open_ticket")
+    async def open_ticket(self, interaction: discord.Interaction, _: discord.ui.Button[ModmailPanelView]) -> None:
+        await self.bot.modmail_service.handle_open_ticket(interaction)
+
+
+class TicketThreadView(discord.ui.View):
+    def __init__(self, bot: OverwatchBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, custom_id="modmail_close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, _: discord.ui.Button[TicketThreadView]) -> None:
+        await self.bot.modmail_service.handle_close_ticket(interaction)
+
+
+class ModmailService:
+    def __init__(self, bot: OverwatchBot) -> None:
+        self.bot = bot
+        self.lock = asyncio.Lock()
+
+    async def _resolve_panel_channel(self, config: ModmailConfig) -> discord.TextChannel | None:
+        if not config.panel_channel_id:
+            return None
+        channel = self.bot.get_channel(config.panel_channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(config.panel_channel_id)
+            except discord.DiscordException:
+                logger.warning("Unable to fetch modmail channel %s", config.panel_channel_id)
+                return None
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        logger.warning("Configured modmail channel is not a text channel: %s", config.panel_channel_id)
+        return None
+
+    async def _resolve_logs_channel(self, config: ModmailConfig) -> discord.TextChannel | None:
+        if not config.logs_channel_id:
+            return None
+        channel = self.bot.get_channel(config.logs_channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(config.logs_channel_id)
+            except discord.DiscordException:
+                logger.warning("Unable to fetch modmail logs channel %s", config.logs_channel_id)
+                return None
+        if isinstance(channel, discord.TextChannel):
+            return channel
+        logger.warning("Configured modmail logs channel is not a text channel: %s", config.logs_channel_id)
+        return None
+
+    async def _resolve_thread_by_id(self, thread_id: int) -> discord.Thread | None:
+        channel = self.bot.get_channel(thread_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(thread_id)
+            except discord.DiscordException:
+                return None
+        if isinstance(channel, discord.Thread):
+            return channel
+        return None
+
+    def _ticket_name(self, member: discord.Member) -> str:
+        raw = member.display_name.lower().strip()
+        cleaned = "".join(ch if ch.isalnum() else "-" for ch in raw)
+        compact = "-".join(part for part in cleaned.split("-") if part)[:42]
+        if not compact:
+            compact = "user"
+        return f"ticket-{compact}-{member.id}"
+
+    def _panel_embed(self) -> discord.Embed:
+        embed = discord.Embed(
+            title="Modmail / Tickets",
+            description="Need help from staff? Press **Open Ticket** to create a private support thread.",
+            color=discord.Color.blurple(),
+        )
+        return embed
+
+    def _ticket_embed(self, ticket_id: int, member: discord.Member, created_at: str) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Ticket #{ticket_id}",
+            description="Use this thread for private support with moderators.",
+            color=discord.Color.green(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=False)
+        embed.add_field(name="Opened", value=_discord_ts(created_at), inline=True)
+        embed.set_footer(text="Moderators can close with the button below.")
+        return embed
+
+    def _build_transcript_text(
+        self,
+        *,
+        ticket_id: int,
+        thread_id: int,
+        opener_id: int,
+        closed_by_id: int,
+        messages: list[discord.Message],
+    ) -> str:
+        lines: list[str] = [
+            f"Ticket #{ticket_id}",
+            f"Thread ID: {thread_id}",
+            f"Opened by: {opener_id}",
+            f"Closed by: {closed_by_id}",
+            f"Message count: {len(messages)}",
+            "",
+        ]
+        for message in messages:
+            timestamp = message.created_at.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+            lines.append(f"[{timestamp}] {message.author} ({message.author.id})")
+            lines.append(message.content if message.content else "<no text>")
+            if message.attachments:
+                for attachment in message.attachments:
+                    lines.append(f"Attachment: {attachment.filename} | {attachment.url}")
+            if message.embeds:
+                lines.append(f"Embeds: {len(message.embeds)}")
+            if message.stickers:
+                lines.append(f"Stickers: {len(message.stickers)}")
+            lines.append("-" * 72)
+        return "\n".join(lines)
+
+    async def _send_ticket_log(self, *, ticket: ModmailTicket, thread: discord.Thread, closed_by_id: int) -> str:
+        config = self.bot.db.get_modmail_config()
+        logs_channel = await self._resolve_logs_channel(config)
+        if logs_channel is None:
+            return "Log not posted (set a logs channel with `/modmail_logs_channel`)."
+
+        messages: list[discord.Message] = []
+        try:
+            async for message in thread.history(limit=None, oldest_first=True):
+                messages.append(message)
+        except discord.DiscordException:
+            return f"Log channel set, but failed to read thread history for ticket #{ticket.ticket_id}."
+
+        summary_embed = discord.Embed(
+            title=f"Ticket #{ticket.ticket_id} Log",
+            color=discord.Color.gold(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        summary_embed.add_field(name="Ticket User", value=f"<@{ticket.user_id}> (`{ticket.user_id}`)", inline=False)
+        summary_embed.add_field(name="Closed By", value=f"<@{closed_by_id}> (`{closed_by_id}`)", inline=False)
+        summary_embed.add_field(name="Source Thread", value=f"<#{thread.id}>", inline=True)
+        summary_embed.add_field(name="Messages", value=f"`{len(messages)}`", inline=True)
+
+        transcript = self._build_transcript_text(
+            ticket_id=ticket.ticket_id,
+            thread_id=thread.id,
+            opener_id=ticket.user_id,
+            closed_by_id=closed_by_id,
+            messages=messages,
+        )
+        transcript_file = discord.File(
+            fp=BytesIO(transcript.encode("utf-8")),
+            filename=f"ticket-{ticket.ticket_id}-transcript.txt",
+        )
+
+        try:
+            await logs_channel.send(embed=summary_embed, file=transcript_file)
+        except discord.DiscordException:
+            return f"Failed to send transcript for ticket #{ticket.ticket_id} to logs channel."
+
+        for message in messages:
+            if not message.attachments:
+                continue
+            files: list[discord.File] = []
+            failed_urls: list[str] = []
+            for attachment in message.attachments:
+                try:
+                    files.append(await attachment.to_file(use_cached=True))
+                except discord.DiscordException:
+                    failed_urls.append(attachment.url)
+                except ValueError:
+                    failed_urls.append(attachment.url)
+
+            if files:
+                for index in range(0, len(files), 10):
+                    chunk = files[index : index + 10]
+                    caption = (
+                        f"Ticket #{ticket.ticket_id} attachments from <@{message.author.id}> "
+                        f"at <t:{int(message.created_at.timestamp())}:f>"
+                    )
+                    if index > 0:
+                        caption = f"Ticket #{ticket.ticket_id} attachments (continued)"
+                    try:
+                        await logs_channel.send(content=caption, files=chunk)
+                    except discord.DiscordException:
+                        continue
+            if failed_urls:
+                for index in range(0, len(failed_urls), 10):
+                    chunk_urls = failed_urls[index : index + 10]
+                    try:
+                        await logs_channel.send(
+                            content=(
+                                f"Ticket #{ticket.ticket_id} attachment URLs from <@{message.author.id}>:\n"
+                                + "\n".join(chunk_urls)
+                            )
+                        )
+                    except discord.DiscordException:
+                        continue
+
+        return f"Log posted in {logs_channel.mention}."
+
+    async def sync_panel(self, *, repost: bool = False) -> None:
+        config = self.bot.db.get_modmail_config()
+        channel = await self._resolve_panel_channel(config)
+        if channel is None:
+            return
+
+        embed = self._panel_embed()
+        view = ModmailPanelView(self.bot)
+        message_id = config.panel_message_id or 0
+        if repost:
+            if message_id > 0:
+                try:
+                    old = await channel.fetch_message(message_id)
+                    await old.delete()
+                except discord.DiscordException:
+                    pass
+            message = await channel.send(embed=embed, view=view)
+            self.bot.db.set_modmail_message(message.id)
+            return
+
+        if message_id <= 0:
+            message = await channel.send(embed=embed, view=view)
+            self.bot.db.set_modmail_message(message.id)
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.edit(content=None, embed=embed, view=view)
+        except discord.NotFound:
+            message = await channel.send(embed=embed, view=view)
+            self.bot.db.set_modmail_message(message.id)
+        except discord.DiscordException as exc:
+            logger.warning("Unable to sync modmail panel: %s", exc)
+
+    async def admin_set_channel(self, channel_id: int) -> None:
+        async with self.lock:
+            self.bot.db.set_modmail_channel(channel_id)
+            await self.sync_panel(repost=True)
+
+    async def admin_set_logs_channel(self, channel_id: int) -> None:
+        async with self.lock:
+            self.bot.db.set_modmail_logs_channel(channel_id)
+
+    async def handle_open_ticket(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            await interaction.followup.send("Tickets can only be opened from inside a server.", ephemeral=True)
+            return
+
+        async with self.lock:
+            config = self.bot.db.get_modmail_config()
+            channel = await self._resolve_panel_channel(config)
+            if channel is None:
+                await interaction.followup.send("Modmail channel is not configured.", ephemeral=True)
+                return
+
+            try:
+                thread = await channel.create_thread(
+                    name=self._ticket_name(interaction.user),
+                    type=discord.ChannelType.private_thread,
+                    auto_archive_duration=1440,
+                    invitable=False,
+                    reason=f"Modmail ticket for {interaction.user.id}",
+                )
+            except discord.DiscordException:
+                await interaction.followup.send(
+                    "I couldn't create a private ticket thread. Check channel permissions for private threads.",
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                await thread.add_user(interaction.user)
+            except discord.DiscordException:
+                # If this fails, keep the thread and let staff handle it.
+                pass
+
+            try:
+                ticket = self.bot.db.create_modmail_ticket(
+                    guild_id=interaction.guild.id,
+                    user_id=interaction.user.id,
+                    thread_id=thread.id,
+                )
+            except Exception:
+                try:
+                    await thread.delete(reason="Failed to persist ticket")
+                except discord.DiscordException:
+                    pass
+                await interaction.followup.send("Failed to create a ticket record. Try again.", ephemeral=True)
+                return
+
+            await thread.send(
+                content=f"{interaction.user.mention} opened a ticket.",
+                embed=self._ticket_embed(ticket.ticket_id, interaction.user, ticket.created_at),
+                view=TicketThreadView(self.bot),
+            )
+            await interaction.followup.send(f"Ticket opened: {thread.mention}", ephemeral=True)
+
+    async def handle_close_ticket(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(thinking=False)
+        channel = interaction.channel
+        if not isinstance(channel, discord.Thread):
+            await interaction.followup.send("Use this in a ticket thread.", ephemeral=True)
+            return
+
+        ticket = self.bot.db.get_modmail_ticket_by_thread(channel.id)
+        if ticket is None or ticket.status != "open":
+            await interaction.followup.send("This thread is not an open ticket.", ephemeral=True)
+            return
+
+        allowed = interaction.user.id == ticket.user_id or _is_ticket_staff(interaction)
+        if not allowed:
+            await interaction.followup.send("Only the ticket owner or staff can close this ticket.", ephemeral=True)
+            return
+
+        async with self.lock:
+            changed = self.bot.db.close_modmail_ticket_by_thread(thread_id=channel.id, closed_by=interaction.user.id)
+            if not changed:
+                await interaction.followup.send("Ticket is already closed.", ephemeral=True)
+                return
+            await self._send_ticket_log(ticket=ticket, thread=channel, closed_by_id=interaction.user.id)
+
+            closed_embed = discord.Embed(
+                title=f"Ticket #{ticket.ticket_id} Closed",
+                description=f"Closed by <@{interaction.user.id}>",
+                color=discord.Color.dark_grey(),
+                timestamp=datetime.now(timezone.utc),
+            )
+            try:
+                await channel.send(embed=closed_embed)
+            except discord.DiscordException:
+                pass
+            try:
+                await channel.edit(locked=True, archived=True, reason=f"Ticket closed by {interaction.user.id}")
+            except discord.DiscordException:
+                pass
 
 class QueueService:
     def __init__(self, bot: OverwatchBot) -> None:
@@ -2058,6 +2407,7 @@ class OverwatchBot(commands.Bot):
             default_support_per_team=settings.support_per_team,
         )
         self.queue_service = QueueService(self)
+        self.modmail_service = ModmailService(self)
         self._ready_once = False
 
         config = self.db.get_queue_config()
@@ -2072,9 +2422,21 @@ class OverwatchBot(commands.Bot):
             team_a_voice_channel_id=team_a_vc_id,
             team_b_voice_channel_id=team_b_vc_id,
         )
+        modmail_config = self.db.get_modmail_config()
+        modmail_channel_id = modmail_config.panel_channel_id or settings.modmail_channel_id
+        modmail_logs_channel_id = modmail_config.logs_channel_id or settings.modmail_logs_channel_id
+        self.db.update_modmail_config(
+            panel_channel_id=modmail_channel_id,
+            panel_message_id=(
+                modmail_config.panel_message_id if modmail_channel_id == modmail_config.panel_channel_id else 0
+            ),
+            logs_channel_id=modmail_logs_channel_id,
+        )
 
     async def setup_hook(self) -> None:
         register_commands(self)
+        self.add_view(ModmailPanelView(self))
+        self.add_view(TicketThreadView(self))
         if self.settings.command_guild_id:
             guild = discord.Object(id=self.settings.command_guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -2089,6 +2451,7 @@ class OverwatchBot(commands.Bot):
             logger.info("Connected as %s (%s)", self.user.name, self.user.id)
         if not self._ready_once:
             await self.queue_service.sync_panel()
+            await self.modmail_service.sync_panel()
             await self.queue_service.resume_active_match()
             await self.queue_service.sync_leaderboard_image()
             self._ready_once = True
@@ -2118,6 +2481,67 @@ def register_commands(bot: OverwatchBot) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
         await bot.queue_service.admin_set_channel(channel.id)
         await interaction.followup.send(f"Queue channel set to {channel.mention}.", ephemeral=True)
+
+    @bot.tree.command(name="modmail_channel", description="Set the modmail panel channel and post the embed.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(channel="Text channel where modmail embed should live")
+    async def modmail_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await bot.modmail_service.admin_set_channel(channel.id)
+        await interaction.followup.send(f"Modmail channel set to {channel.mention}.", ephemeral=True)
+
+    @bot.tree.command(name="modmail_logs_channel", description="Set where closed ticket logs are posted.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(channel="Text channel for ticket logs")
+    async def modmail_logs_channel(interaction: discord.Interaction, channel: discord.TextChannel) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await bot.modmail_service.admin_set_logs_channel(channel.id)
+        await interaction.followup.send(f"Modmail logs channel set to {channel.mention}.", ephemeral=True)
+
+    @bot.tree.command(name="modmail_logs_channel_id", description="Set ticket logs channel by raw channel ID.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(channel_id="Discord text channel ID for ticket logs")
+    async def modmail_logs_channel_id(interaction: discord.Interaction, channel_id: str) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+
+        try:
+            parsed_id = int(channel_id.strip())
+        except ValueError:
+            await interaction.response.send_message("`channel_id` must be a valid integer.", ephemeral=True)
+            return
+
+        channel = bot.get_channel(parsed_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(parsed_id)
+            except discord.DiscordException:
+                await interaction.response.send_message("I could not fetch that channel ID.", ephemeral=True)
+                return
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("That ID is not a text channel.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await bot.modmail_service.admin_set_logs_channel(channel.id)
+        await interaction.followup.send(f"Modmail logs channel set to {channel.mention}.", ephemeral=True)
+
+    @bot.tree.command(name="modmail_refresh", description="Repost the modmail panel message.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def modmail_refresh(interaction: discord.Interaction) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        await bot.modmail_service.sync_panel(repost=True)
+        await interaction.followup.send("Modmail panel refreshed.", ephemeral=True)
 
     @bot.tree.command(name="queue_vc", description="Set main and team voice channels used for match start checks.")
     @app_commands.default_permissions(manage_guild=True)
@@ -2485,6 +2909,10 @@ def register_commands(bot: OverwatchBot) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
         await bot.queue_service.sync_panel(repost=True)
         await interaction.followup.send("Queue panel refreshed.", ephemeral=True)
+
+    @bot.tree.command(name="ticket_close", description="Close the current modmail ticket thread.")
+    async def ticket_close(interaction: discord.Interaction) -> None:
+        await bot.modmail_service.handle_close_ticket(interaction)
 
     @bot.tree.command(name="queue_admin_test_scenario", description="Load a test scenario with synthetic players.")
     @app_commands.default_permissions(manage_guild=True)

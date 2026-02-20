@@ -5,6 +5,7 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
 ## Behavior
 
 - The queue panel lives in one configured text channel.
+- Optional modmail panel lives in one configured text channel (`MODMAIL_CHANNEL_ID`).
 - Optional leaderboard panel lives in one configured text channel (`LEADERBOARD_CHANNEL_ID`).
 - Players do not use slash commands. They only use buttons:
   - `Join Tank`
@@ -15,6 +16,11 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - `Leave Queue`
 - On first queue join, the bot asks the player for BattleTag and stores it.
 - If a user sends a message in the queue channel, the bot deletes that message and reposts the queue panel with the same state.
+- Modmail flow:
+  - Users click `Open Ticket` on the modmail embed.
+  - Bot creates private ticket threads (users can have multiple open tickets).
+  - Ticket can be closed with the `Close Ticket` button or `/ticket_close`.
+  - On close, bot posts ticket logs (including attachment/image files and a transcript) to `MODMAIL_LOGS_CHANNEL_ID`.
 - When queue size reaches `players_per_match`, exactly one active match is created (no concurrent matches).
 - Match flow:
   - Players use `Ready Up` (no fixed countdown).
@@ -33,9 +39,13 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
 
 ## Admin Slash Commands
 
-All slash commands are intended for admins (`Manage Server`):
+Most slash commands are intended for admins (`Manage Server`), except `/ticket_close`:
 
 - `/queue_channel` set queue channel and post panel
+- `/modmail_channel` set modmail channel and post panel
+- `/modmail_logs_channel` set ticket logs channel
+- `/modmail_logs_channel_id` set ticket logs channel by raw channel ID
+- `/modmail_refresh` repost modmail panel
 - `/queue_vc` set main/team voice channels for ready check and auto-move
 - `/vc_finish` force-complete current VC check and start the match immediately (optionally treating synthetic test players as VC-ready)
 - `/vc_private` toggle Team A/Team B VC private mode for manual joins
@@ -54,6 +64,7 @@ All slash commands are intended for admins (`Manage Server`):
 - `/match_remake` cancel active match, requeue players, and attempt immediate remake
 - `/queue_clear` clear queue
 - `/queue_refresh` repost queue panel
+- `/ticket_close` close the current modmail ticket thread (ticket owner or staff)
 - `/queue_admin_test_scenario` load synthetic test scenarios
 - `/queue_admin_test_add` add synthetic test players by role
 - `/queue_admin_test_results` apply synthetic win/loss/draw patterns to recent matches
@@ -69,14 +80,26 @@ All slash commands are intended for admins (`Manage Server`):
    - Send Messages
    - Manage Messages
    - Read Message History
-4. Create env file:
+4. If using modmail, grant bot permissions in the modmail panel channel:
+   - View Channel
+   - Send Messages
+   - Create Private Threads
+   - Send Messages in Threads
+   - Manage Threads
+   - Read Message History
+5. If using modmail logs, grant bot permissions in the logs channel:
+   - View Channel
+   - Send Messages
+   - Attach Files
+   - Read Message History
+6. Create env file:
 
    ```bash
    cp .env.example .env
    ```
 
-5. Fill in `DISCORD_TOKEN` in `.env`.
-6. Install and run:
+7. Fill in `DISCORD_TOKEN` in `.env`.
+8. Install and run:
 
    ```bash
    python3 -m venv .venv
@@ -123,6 +146,8 @@ Notes:
 - `DISCORD_TOKEN` (required)
 - `COMMAND_GUILD_ID` (optional; faster command sync during development)
 - `QUEUE_CHANNEL_ID` (optional; initial queue channel)
+- `MODMAIL_CHANNEL_ID` (optional; initial modmail panel channel)
+- `MODMAIL_LOGS_CHANNEL_ID` (optional; closed ticket log channel)
 - `LEADERBOARD_CHANNEL_ID` (optional; channel where leaderboard image is posted)
 - `MAIN_VOICE_CHANNEL_ID` (optional; waiting voice channel for queued players)
 - `TEAM_A_VOICE_CHANNEL_ID` (optional; Team A match voice channel)

@@ -151,3 +151,22 @@ class MatchCaptain:
     selected_by: int
     selected_at: str
     selection_method: str  # admin_auto | first_claim
+
+
+@dataclass(slots=True)
+class ModmailConfig:
+    panel_channel_id: int | None
+    panel_message_id: int | None
+    logs_channel_id: int | None
+
+
+@dataclass(slots=True)
+class ModmailTicket:
+    ticket_id: int
+    guild_id: int
+    user_id: int
+    thread_id: int
+    status: str  # open | closed
+    created_at: str
+    closed_at: str | None
+    closed_by: int | None
