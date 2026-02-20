@@ -317,6 +317,51 @@ class ModmailService:
             return channel
         return None
 
+    def _is_modmail_panel_message(self, message: discord.Message) -> bool:
+        if self.bot.user is None or message.author.id != self.bot.user.id:
+            return False
+        has_title = any((embed.title or "").strip() == "Modmail / Tickets" for embed in message.embeds)
+        if not has_title:
+            return False
+        for row in message.components:
+            for child in row.children:
+                if getattr(child, "custom_id", None) == "modmail_open_ticket":
+                    return True
+        return False
+
+    async def _find_modmail_panel_messages(
+        self,
+        channel: discord.TextChannel,
+        *,
+        limit: int = 200,
+    ) -> list[discord.Message]:
+        if self.bot.user is None:
+            return []
+        matches: list[discord.Message] = []
+        try:
+            async for message in channel.history(limit=limit):
+                if self._is_modmail_panel_message(message):
+                    matches.append(message)
+        except discord.DiscordException:
+            return matches
+        return matches
+
+    async def _cleanup_duplicate_panels(
+        self,
+        channel: discord.TextChannel,
+        *,
+        keep_message_id: int,
+        candidates: list[discord.Message] | None = None,
+    ) -> None:
+        messages = candidates if candidates is not None else await self._find_modmail_panel_messages(channel)
+        for message in messages:
+            if message.id == keep_message_id:
+                continue
+            try:
+                await message.delete()
+            except discord.DiscordException:
+                continue
+
     def _ticket_name(self, member: discord.Member) -> str:
         raw = member.display_name.lower().strip()
         cleaned = "".join(ch if ch.isalnum() else "-" for ch in raw)
@@ -466,30 +511,46 @@ class ModmailService:
         embed = self._panel_embed()
         view = ModmailPanelView(self.bot)
         message_id = config.panel_message_id or 0
+
+        known_message: discord.Message | None = None
+        if message_id > 0:
+            try:
+                candidate = await channel.fetch_message(message_id)
+                if self._is_modmail_panel_message(candidate):
+                    known_message = candidate
+            except discord.DiscordException:
+                known_message = None
+        discovered = await self._find_modmail_panel_messages(channel)
+        if known_message is None and discovered:
+            known_message = discovered[0]
+
         if repost:
-            if message_id > 0:
-                try:
-                    old = await channel.fetch_message(message_id)
-                    await old.delete()
-                except discord.DiscordException:
-                    pass
-            message = await channel.send(embed=embed, view=view)
-            self.bot.db.set_modmail_message(message.id)
+            if known_message is None:
+                known_message = await channel.send(embed=embed, view=view)
+            else:
+                await known_message.edit(content=None, embed=embed, view=view)
+            self.bot.db.set_modmail_message(known_message.id)
+            await self._cleanup_duplicate_panels(
+                channel,
+                keep_message_id=known_message.id,
+                candidates=discovered,
+            )
             return
 
-        if message_id <= 0:
-            message = await channel.send(embed=embed, view=view)
-            self.bot.db.set_modmail_message(message.id)
-            return
-
-        try:
-            message = await channel.fetch_message(message_id)
-            await message.edit(content=None, embed=embed, view=view)
-        except discord.NotFound:
-            message = await channel.send(embed=embed, view=view)
-            self.bot.db.set_modmail_message(message.id)
-        except discord.DiscordException as exc:
-            logger.warning("Unable to sync modmail panel: %s", exc)
+        if known_message is None:
+            known_message = await channel.send(embed=embed, view=view)
+        else:
+            try:
+                await known_message.edit(content=None, embed=embed, view=view)
+            except discord.DiscordException as exc:
+                logger.warning("Unable to sync modmail panel: %s", exc)
+                return
+        self.bot.db.set_modmail_message(known_message.id)
+        await self._cleanup_duplicate_panels(
+            channel,
+            keep_message_id=known_message.id,
+            candidates=discovered,
+        )
 
     async def admin_set_channel(self, channel_id: int) -> None:
         async with self.lock:
