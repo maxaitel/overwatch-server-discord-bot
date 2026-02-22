@@ -1316,6 +1316,16 @@ class QueueService:
         active = self.bot.db.get_active_match()
         if active is None:
             return
+        if active.status == "waiting_vc":
+            # Legacy safety: older deployments may resume into waiting_vc, but this flow now starts matches live.
+            self.bot.db.update_active_match(
+                status="live",
+                started_at=(active.started_at or _utc_now_iso()),
+                ready_deadline=None,
+            )
+            refreshed = self.bot.db.get_active_match()
+            if refreshed is not None:
+                active = refreshed
         if active.match_id not in self._vc_check_status:
             teams = self.bot.db.get_match_teams(active.match_id)
             if teams is not None:
@@ -1817,8 +1827,16 @@ class QueueService:
             )
             try:
                 await message.edit(embed=updated_embed, view=MatchResultView(self.bot))
-            except discord.DiscordException:
-                pass
+            except discord.DiscordException as exc:
+                logger.warning("Unable to mark dispute on result message for match %s: %s", match_id, exc)
+                await interaction.followup.send(
+                    (
+                        f"I couldn't mark dispute status on the result embed for match `{match_id}`. "
+                        "Ask an admin to resolve with `/match_result`."
+                    ),
+                    ephemeral=True,
+                )
+                return
 
             await interaction.followup.send(
                 f"Dispute opened for match `{match_id}`. Admins have been signaled on the result embed.",
