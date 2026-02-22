@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import logging
 import random
+import re
 
 import discord
 from discord import app_commands
@@ -52,6 +53,7 @@ TEST_ROLE_CHOICES = [
     app_commands.Choice(name="Open", value="open"),
 ]
 TEST_BOT_ID_BASE = 980_000_000_000_000_000
+RESULT_EMBED_TITLE_RE = re.compile(r"^Match #(\d+) Completed$")
 
 
 def _utc_now_iso() -> str:
@@ -220,13 +222,27 @@ class ActiveMatchView(discord.ui.View):
         await self.bot.queue_service.handle_claim_captain(interaction)
 
     @discord.ui.button(
-        label="Escalate Dispute",
+        label="Dispute Winner",
         style=discord.ButtonStyle.danger,
         custom_id="active_match_escalate",
         row=2,
     )
     async def escalate(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
         await self.bot.queue_service.handle_match_escalation(interaction)
+
+
+class MatchResultView(discord.ui.View):
+    def __init__(self, bot: OverwatchBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(
+        label="Dispute Winner",
+        style=discord.ButtonStyle.danger,
+        custom_id="match_result_dispute",
+    )
+    async def dispute_winner(self, interaction: discord.Interaction, _: discord.ui.Button[MatchResultView]) -> None:
+        await self.bot.queue_service.handle_result_dispute(interaction)
 
 
 class BattleTagModal(discord.ui.Modal, title="Set BattleTag"):
@@ -791,6 +807,18 @@ class QueueService:
         first_team, first_row = rows[0]
         return f"{first_team} by <@{int(first_row['reporter_id'])}> ({_discord_ts(first_row['reported_at'])})"
 
+    def _match_id_from_result_message(self, message: discord.Message | None) -> int | None:
+        if message is None or not message.embeds:
+            return None
+        title = (message.embeds[0].title or "").strip()
+        match = RESULT_EMBED_TITLE_RE.match(title)
+        if match is None:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
     def _summarize_missing_mentions(self, ids: list[int], *, limit: int = 4) -> str:
         if not ids:
             return "none"
@@ -943,7 +971,7 @@ class QueueService:
             title=f"Active Match #{active.match_id}",
             description=(
                 f"Phase: `{status_label}`\n"
-                f"Ready: `{len(ready_ids)}/{len(all_player_ids)}` | Reports: `{report_count}/2`"
+                f"Ready: `{len(ready_ids)}/{len(all_player_ids)}` | Reports: `{report_count}/1` (first report decides)"
             ),
             color=discord.Color.orange() if active.status == "waiting_vc" else discord.Color.green(),
         )
@@ -1557,6 +1585,11 @@ class QueueService:
         )
         embed.timestamp = datetime.now(timezone.utc)
         embed.add_field(
+            name="Result Policy",
+            value="First report was accepted. If wrong, press `Dispute Winner` for admin review.",
+            inline=False,
+        )
+        embed.add_field(
             name="Summary",
             value=(
                 f"Team A total delta: `{_format_delta(team_a_total_delta)}`\n"
@@ -1711,11 +1744,11 @@ class QueueService:
         if channel:
             try:
                 message = await channel.fetch_message(active.message_id)
-                await message.edit(content=None, embed=result_embed, view=None)
+                await message.edit(content=None, embed=result_embed, view=MatchResultView(self.bot))
             except discord.NotFound:
-                await channel.send(embed=result_embed)
+                await channel.send(embed=result_embed, view=MatchResultView(self.bot))
             except discord.DiscordException:
-                await channel.send(embed=result_embed)
+                await channel.send(embed=result_embed, view=MatchResultView(self.bot))
 
         self.bot.db.clear_match_reports(match_id)
         self.bot.db.clear_match_ready(match_id)
@@ -1745,12 +1778,6 @@ class QueueService:
             if player_team is None:
                 await interaction.followup.send("You are not part of the active match.", ephemeral=True)
                 return
-            if self._reports_complete(active.match_id):
-                await interaction.followup.send(
-                    "Both team reports are already submitted. Ask admins to resolve with `/match_result` if needed.",
-                    ephemeral=True,
-                )
-                return
 
             if report_type == "win":
                 reported_winner = player_team
@@ -1770,34 +1797,14 @@ class QueueService:
                 await interaction.followup.send(msg, ephemeral=True)
                 return
 
-            reports = self.bot.db.get_match_reports(active.match_id)
-            report_a = reports.get("Team A")
-            report_b = reports.get("Team B")
-
-            if report_a and report_b:
-                winner_a = report_a["reported_winner_team"]
-                winner_b = report_b["reported_winner_team"]
-                if winner_a == winner_b:
-                    await self._finalize_active_match(active.match_id, winner_a)
-                    await interaction.followup.send("Both teams agreed on the result.", ephemeral=True)
-                    return
-
-                self.bot.db.update_active_match(status="disputed")
-                self._active_match_updates[active.match_id] = (
-                    "Result conflict detected. Players can use `Escalate Dispute` for admin review."
-                )
-                await self._sync_active_match_message()
-                await interaction.followup.send(
-                    "Conflict detected. If unresolved, press `Escalate Dispute`.",
-                    ephemeral=True,
-                )
-                return
-
-            await self._sync_active_match_message()
-            if msg == "report updated":
-                await interaction.followup.send("Your team report was updated.", ephemeral=True)
-                return
-            await interaction.followup.send("Your team report was recorded. Waiting for the other team report.", ephemeral=True)
+            await self._finalize_active_match(active.match_id, reported_winner)
+            await interaction.followup.send(
+                (
+                    f"Result submitted. Match finalized as `{reported_winner}`. "
+                    "If this is incorrect, press `Dispute Winner` on the result message."
+                ),
+                ephemeral=True,
+            )
 
     async def handle_match_escalation(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
@@ -1817,6 +1824,51 @@ class QueueService:
             )
             await self._sync_active_match_message()
             await interaction.followup.send("Dispute escalated to admins.", ephemeral=True)
+
+    async def handle_result_dispute(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        async with self.lock:
+            match_id = self._match_id_from_result_message(interaction.message)
+            if match_id is None:
+                await interaction.followup.send("Could not determine match ID from this result message.", ephemeral=True)
+                return
+
+            player_team = self.bot.db.get_player_team_for_match(match_id, interaction.user.id)
+            if player_team is None and not _is_admin(interaction):
+                await interaction.followup.send("Only match players or admins can dispute this winner.", ephemeral=True)
+                return
+
+            message = interaction.message
+            if message is None or not message.embeds:
+                await interaction.followup.send("Result message is unavailable.", ephemeral=True)
+                return
+
+            updated_embed = discord.Embed.from_dict(message.embeds[0].to_dict())
+            for field in updated_embed.fields:
+                if field.name == "Dispute":
+                    await interaction.followup.send(
+                        f"Dispute is already open for match `{match_id}`. Admins can resolve with `/match_result`.",
+                        ephemeral=True,
+                    )
+                    return
+
+            updated_embed.add_field(
+                name="Dispute",
+                value=(
+                    f"Opened by <@{interaction.user.id}> at {_discord_ts(_utc_now_iso())}.\n"
+                    f"Admins can resolve with `/match_result` using match ID `{match_id}`."
+                ),
+                inline=False,
+            )
+            try:
+                await message.edit(embed=updated_embed, view=MatchResultView(self.bot))
+            except discord.DiscordException:
+                pass
+
+            await interaction.followup.send(
+                f"Dispute opened for match `{match_id}`. Admins have been signaled on the result embed.",
+                ephemeral=True,
+            )
 
     async def sync_panel(self, *, repost: bool = False) -> None:
         config = self.bot.db.get_queue_config()
@@ -2458,6 +2510,7 @@ class OverwatchBot(commands.Bot):
         register_commands(self)
         self.add_view(ModmailPanelView(self))
         self.add_view(TicketThreadView(self))
+        self.add_view(MatchResultView(self))
         if self.settings.command_guild_id:
             guild = discord.Object(id=self.settings.command_guild_id)
             self.tree.copy_global_to(guild=guild)

@@ -29,8 +29,9 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - If players are elsewhere, match still starts and waits for them normally.
   - Match lifecycle updates are written into the active match embed (reduced channel spam).
   - Active match embed includes BattleTags, ready states, and a VC checklist (`in VC`, `missing`, `disconnected`).
-  - Active match panel has `We Won`, `We Lost`, and `Escalate Dispute` buttons.
-  - Once both teams submit reports, result buttons lock and embed shows report timestamps + first reporter.
+- Active match panel has `We Won`, `We Lost`, and `Dispute Winner` buttons.
+- The first winner report is accepted immediately and finalizes the match.
+- Completed match embeds include a `Dispute Winner` button for admin review if the winner was reported incorrectly.
   - Dispute escalation does not use `@here`.
   - When result is finalized, the active panel is replaced with a clean match-complete summary showing winner and per-player MMR changes.
   - Leaderboard image auto-regenerates and reposts whenever match MMR updates.
