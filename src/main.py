@@ -772,6 +772,62 @@ class QueueService:
         except (TypeError, ValueError):
             return None
 
+    def _updated_archived_result_embed(
+        self,
+        original: discord.Embed,
+        *,
+        winner_team: str,
+        changes: list[MatchMmrChange],
+    ) -> discord.Embed:
+        payload = original.to_dict()
+        payload["description"] = f"Result: `{winner_team}`"
+        payload["color"] = (
+            discord.Color.blurple().value if winner_team == "Draw" else discord.Color.green().value
+        )
+
+        team_a_total_delta = sum(change.delta for change in changes if change.team == "Team A")
+        team_b_total_delta = sum(change.delta for change in changes if change.team == "Team B")
+        fields = [field for field in payload.get("fields", []) if field.get("name") != "Dispute"]
+        for field in fields:
+            name = str(field.get("name", ""))
+            if name == "Summary":
+                field["value"] = (
+                    f"Team A total delta: `{_format_delta(team_a_total_delta)}`\n"
+                    f"Team B total delta: `{_format_delta(team_b_total_delta)}`"
+                )
+            elif name == "Team A MMR":
+                field["value"] = self._mmr_change_block(changes, "Team A")
+            elif name == "Team B MMR":
+                field["value"] = self._mmr_change_block(changes, "Team B")
+        payload["fields"] = fields
+        return discord.Embed.from_dict(payload)
+
+    async def _refresh_archived_result_message(self, match_id: int, winner_team: str) -> bool:
+        config = self.bot.db.get_queue_config()
+        channel = await self.resolve_queue_channel(config)
+        if channel is None:
+            return False
+
+        changes = self.bot.db.get_match_mmr_changes(match_id)
+        expected_title = f"Match #{match_id} Completed"
+        async for message in channel.history(limit=250):
+            if not message.embeds:
+                continue
+            title = (message.embeds[0].title or "").strip()
+            if title != expected_title:
+                continue
+            updated_embed = self._updated_archived_result_embed(
+                message.embeds[0],
+                winner_team=winner_team,
+                changes=changes,
+            )
+            try:
+                await message.edit(content=None, embed=updated_embed, view=MatchResultView(self.bot))
+                return True
+            except discord.DiscordException:
+                return False
+        return False
+
     def _summarize_missing_mentions(self, ids: list[int], *, limit: int = 4) -> str:
         if not ids:
             return "none"
@@ -2125,13 +2181,19 @@ class QueueService:
                     mmr_note = "MMR already applied."
             else:
                 return True, f"Result saved, but MMR update failed: {mmr_msg}."
+            embed_note = ""
+            if await self._refresh_archived_result_message(match_id, winner_team):
+                embed_note = " Result embed updated."
             if active and active.match_id != match_id:
                 if mmr_note:
-                    return True, f"Result saved for archived match. {mmr_note} Active match is `#{active.match_id}`."
-                return True, f"Result saved for archived match. Active match is `#{active.match_id}`."
+                    return (
+                        True,
+                        f"Result saved for archived match. {mmr_note}{embed_note} Active match is `#{active.match_id}`.",
+                    )
+                return True, f"Result saved for archived match.{embed_note} Active match is `#{active.match_id}`."
             if mmr_note:
-                return True, f"Result saved. {mmr_note}"
-            return True, "Result saved."
+                return True, f"Result saved. {mmr_note}{embed_note}"
+            return True, f"Result saved.{embed_note}"
 
     async def admin_force_vc_check(self, *, assume_test_players_ready: bool = True) -> tuple[bool, str]:
         async with self.lock:
@@ -2475,7 +2537,7 @@ def register_commands(bot: OverwatchBot) -> None:
         await bot.modmail_service.sync_panel(repost=True)
         await interaction.followup.send("Modmail panel refreshed.", ephemeral=True)
 
-    @bot.tree.command(name="queue_vc", description="Set main and team voice channels used for match start checks.")
+    @bot.tree.command(name="queue_vc", description="Set main and team voice channels used for auto-move.")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         main_vc="Main voice channel where queued players wait",
@@ -2521,20 +2583,6 @@ def register_commands(bot: OverwatchBot) -> None:
             ),
             ephemeral=True,
         )
-
-    @bot.tree.command(name="vc_finish", description="Force-finish the current VC check and start the match now.")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(assume_test_ready="Treat synthetic test players as already VC-ready")
-    async def vc_finish(interaction: discord.Interaction, assume_test_ready: bool = True) -> None:
-        if not _is_admin(interaction):
-            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        ok, msg = await bot.queue_service.admin_force_vc_check(assume_test_players_ready=assume_test_ready)
-        if not ok:
-            await interaction.followup.send(msg, ephemeral=True)
-            return
-        await interaction.followup.send(msg, ephemeral=True)
 
     @bot.tree.command(name="vc_private", description="Toggle private mode for Team A / Team B voice channels.")
     @app_commands.default_permissions(manage_guild=True)

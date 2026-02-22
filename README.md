@@ -27,7 +27,7 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - If players are in `MAIN_VOICE_CHANNEL_ID`, bot auto-moves them to their team VC at start.
   - If players are elsewhere, match still starts and waits for them normally.
   - Match lifecycle updates are written into the active match embed (reduced channel spam).
-  - Active match embed includes BattleTags and a VC checklist.
+  - Active match embed includes BattleTags and team rosters.
 - Active match panel has `We Won`, `We Lost`, and `Claim Captain` buttons.
 - The first winner report is accepted immediately and finalizes the match.
 - Completed match embeds include a `Dispute Winner` button for admin review if the winner was reported incorrectly.
@@ -47,8 +47,7 @@ Most slash commands are intended for admins (`Manage Server`), except `/ticket_c
 - `/modmail_logs_channel` set ticket logs channel
 - `/modmail_logs_channel_id` set ticket logs channel by raw channel ID
 - `/modmail_refresh` repost modmail panel
-- `/queue_vc` set main/team voice channels for ready check and auto-move
-- `/vc_finish` force-complete current VC check and start the match immediately (optionally treating synthetic test players as VC-ready)
+- `/queue_vc` set main/team voice channels used for auto-move
 - `/vc_private` toggle Team A/Team B VC private mode for manual joins
 - `/queue_mode` switch between `role` and `open`
 - `/queue_rules` set:
