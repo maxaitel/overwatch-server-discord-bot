@@ -193,6 +193,33 @@ class StorageMmrTests(unittest.TestCase):
         self.assertEqual(self._delta_for(corrected_changes, 101), self._delta_for(changes, 101))
         self.assertEqual(self._delta_for(corrected_changes, 202), self._delta_for(changes, 202))
 
+    def test_recompute_match_mmr_changes_uses_effective_delta_at_rating_cap(self) -> None:
+        match_id = self._record_one_vs_one_match(player_a_mmr=5000, player_b_mmr=5000, role="dps")
+        applied, initial_changes, message = self.db.apply_match_mmr_changes(match_id, "Team A", calibration_multiplier=1.0)
+        self.assertTrue(applied, message)
+        self.assertEqual(self._delta_for(initial_changes, 101), 12)
+        self.assertEqual(self._delta_for(initial_changes, 202), -12)
+
+        player_a_after_first = self.db.get_player(101)
+        player_b_after_first = self.db.get_player(202)
+        self.assertIsNotNone(player_a_after_first)
+        self.assertIsNotNone(player_b_after_first)
+        self.assertEqual(int(player_a_after_first.mmr), 5000)
+        self.assertEqual(int(player_b_after_first.mmr), 4988)
+
+        corrected, corrected_changes, correction_message = self.db.recompute_match_mmr_changes(match_id, "Team B", calibration_multiplier=1.0)
+        self.assertTrue(corrected, correction_message)
+        self.assertEqual(correction_message, "mmr corrected for updated result")
+        self.assertEqual(self._delta_for(corrected_changes, 101), -12)
+        self.assertEqual(self._delta_for(corrected_changes, 202), 12)
+
+        player_a_after_correction = self.db.get_player(101)
+        player_b_after_correction = self.db.get_player(202)
+        self.assertIsNotNone(player_a_after_correction)
+        self.assertIsNotNone(player_b_after_correction)
+        self.assertEqual(int(player_a_after_correction.mmr), 4988)
+        self.assertEqual(int(player_b_after_correction.mmr), 5000)
+
 
 if __name__ == "__main__":
     unittest.main()

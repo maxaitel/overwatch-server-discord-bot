@@ -777,7 +777,10 @@ class Database:
                 if calibration_matches > 0 and calibration_multiplier > 1.0 and prior_games < calibration_matches:
                     multiplier = calibration_multiplier
                 desired_delta = int(round(k_factor * (score - expected) * multiplier))
-                correction = desired_delta - existing.delta
+                existing_effective_delta = int(existing.mmr_after) - int(existing.mmr_before)
+                desired_mmr_after = self._clamp_sr(int(existing.mmr_before) + desired_delta)
+                desired_effective_delta = desired_mmr_after - int(existing.mmr_before)
+                correction = desired_effective_delta - existing_effective_delta
                 if correction == 0:
                     continue
 
@@ -865,7 +868,7 @@ class Database:
                     """,
                     (
                         desired_delta,
-                        self._clamp_sr(existing.mmr_before + desired_delta),
+                        desired_mmr_after,
                         match_id,
                         discord_id,
                     ),
