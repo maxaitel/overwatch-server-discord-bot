@@ -828,43 +828,6 @@ class QueueService:
                 continue
         return moved
 
-    async def _move_members_to_team_vc(
-        self,
-        guild: discord.Guild,
-        player_ids: list[int],
-        to_voice_channel_id: int | None,
-    ) -> int:
-        return await self._move_members_to_voice_channel(
-            guild,
-            player_ids,
-            to_voice_channel_id,
-        )
-
-    async def _move_members_to_voice_channel(
-        self,
-        guild: discord.Guild,
-        player_ids: list[int],
-        to_voice_channel_id: int | None,
-    ) -> int:
-        if not to_voice_channel_id:
-            return 0
-        target_channel = guild.get_channel(to_voice_channel_id)
-        if not isinstance(target_channel, discord.VoiceChannel):
-            return 0
-        moved = 0
-        for discord_id in player_ids:
-            member = await self._safe_fetch_member(guild, discord_id)
-            if member is None or member.voice is None or member.voice.channel is None:
-                continue
-            if member.voice.channel.id == to_voice_channel_id:
-                continue
-            try:
-                await member.move_to(target_channel)
-                moved += 1
-            except discord.DiscordException:
-                continue
-        return moved
-
     def _active_match_mentions(self, team_a_ids: list[int], team_b_ids: list[int]) -> str:
         everyone = team_a_ids + team_b_ids
         return " ".join(f"<@{pid}>" for pid in everyone)
@@ -1662,12 +1625,27 @@ class QueueService:
             except discord.DiscordException:
                 await channel.send(embed=result_embed, view=MatchResultView(self.bot))
 
-            # QoL move: best-effort return match players to main VC after result.
+            # QoL move: best-effort return match players from team VCs to main VC after result.
             main_voice_channel_id = self.bot.db.get_queue_config().main_voice_channel_id
             if main_voice_channel_id:
-                player_ids = self._match_player_ids_from_db(match_id)
                 try:
-                    await self._move_members_to_voice_channel(channel.guild, player_ids, main_voice_channel_id)
+                    teams = self.bot.db.get_match_teams(match_id)
+                    if teams is not None:
+                        team_a_payload, team_b_payload = teams
+                        team_a_ids = self._team_ids_from_payload(team_a_payload)
+                        team_b_ids = self._team_ids_from_payload(team_b_payload)
+                        await self._move_members_from_main_vc(
+                            channel.guild,
+                            team_a_ids,
+                            active.team_a_voice_channel_id,
+                            main_voice_channel_id,
+                        )
+                        await self._move_members_from_main_vc(
+                            channel.guild,
+                            team_b_ids,
+                            active.team_b_voice_channel_id,
+                            main_voice_channel_id,
+                        )
                 except Exception:
                     pass
 
@@ -1886,8 +1864,18 @@ class QueueService:
         team_b_ids = [player.discord_id for player in result.team_b.players]
         mentions = self._active_match_mentions(team_a_ids, team_b_ids)
 
-        moved_a = await self._move_members_to_team_vc(channel.guild, team_a_ids, config.team_a_voice_channel_id)
-        moved_b = await self._move_members_to_team_vc(channel.guild, team_b_ids, config.team_b_voice_channel_id)
+        moved_a = await self._move_members_from_main_vc(
+            channel.guild,
+            team_a_ids,
+            config.main_voice_channel_id,
+            config.team_a_voice_channel_id,
+        )
+        moved_b = await self._move_members_from_main_vc(
+            channel.guild,
+            team_b_ids,
+            config.main_voice_channel_id,
+            config.team_b_voice_channel_id,
+        )
         move_note = f"Auto-move attempted: Team A `{moved_a}`, Team B `{moved_b}`."
 
         if config.main_voice_channel_id:
@@ -2108,6 +2096,7 @@ class QueueService:
 
     async def admin_force_result(self, match_id: int, winner_team: str) -> tuple[bool, str]:
         async with self.lock:
+            previous_winner = self.bot.db.get_match_result(match_id)
             changed, msg = self.bot.db.set_match_result(match_id, winner_team)
             if not changed and msg != "result already set to that value":
                 return False, f"Unable to set result: {msg}."
@@ -2118,14 +2107,30 @@ class QueueService:
                 return True, "Result saved and match finalized."
 
             applied, _, mmr_msg = self.bot.db.apply_match_mmr_changes(match_id, winner_team)
-            if not applied and mmr_msg != "mmr already applied":
-                return True, f"Result saved, but MMR update failed: {mmr_msg}."
+            mmr_note = ""
             if applied:
                 await self.sync_leaderboard_image(force=True)
+                mmr_note = "MMR updated."
+            elif mmr_msg == "mmr already applied":
+                if previous_winner is not None and previous_winner != winner_team:
+                    corrected, _, correction_msg = self.bot.db.recompute_match_mmr_changes(match_id, winner_team)
+                    if not corrected:
+                        return True, f"Result saved, but MMR correction failed: {correction_msg}."
+                    if correction_msg == "mmr corrected for updated result":
+                        await self.sync_leaderboard_image(force=True)
+                        mmr_note = "MMR corrected for updated result."
+                    else:
+                        mmr_note = "MMR already matched result."
+                else:
+                    mmr_note = "MMR already applied."
+            else:
+                return True, f"Result saved, but MMR update failed: {mmr_msg}."
             if active and active.match_id != match_id:
+                if mmr_note:
+                    return True, f"Result saved for archived match. {mmr_note} Active match is `#{active.match_id}`."
                 return True, f"Result saved for archived match. Active match is `#{active.match_id}`."
-            if applied:
-                return True, "Result saved and MMR updated."
+            if mmr_note:
+                return True, f"Result saved. {mmr_note}"
             return True, "Result saved."
 
     async def admin_force_vc_check(self, *, assume_test_players_ready: bool = True) -> tuple[bool, str]:
