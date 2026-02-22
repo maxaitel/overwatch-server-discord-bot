@@ -23,13 +23,12 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - On close, bot posts ticket logs (including attachment/image files and a transcript) to `MODMAIL_LOGS_CHANNEL_ID`.
 - When queue size reaches `players_per_match`, exactly one active match is created (no concurrent matches).
 - Match flow:
-  - Players use `Ready Up` (no fixed countdown).
-  - Bot checks Team A / Team B voice channels when players ready.
+  - Matches start as live immediately once formed.
   - If players are in `MAIN_VOICE_CHANNEL_ID`, bot auto-moves them to their team VC at start.
   - If players are elsewhere, match still starts and waits for them normally.
   - Match lifecycle updates are written into the active match embed (reduced channel spam).
-  - Active match embed includes BattleTags, ready states, and a VC checklist (`in VC`, `missing`, `disconnected`).
-- Active match panel has `We Won`, `We Lost`, and `Dispute Winner` buttons.
+  - Active match embed includes BattleTags and a VC checklist.
+- Active match panel has `We Won`, `We Lost`, and `Claim Captain` buttons.
 - The first winner report is accepted immediately and finalizes the match.
 - Completed match embeds include a `Dispute Winner` button for admin review if the winner was reported incorrectly.
   - Dispute escalation does not use `@here`.
