@@ -2342,24 +2342,10 @@ class OverwatchBot(commands.Bot):
         self._ready_once = False
 
         config = self.db.get_queue_config()
-        queue_channel_id = (
-            settings.queue_channel_id if settings.queue_channel_id is not None else config.queue_channel_id
-        )
-        main_vc_id = (
-            settings.main_voice_channel_id
-            if settings.main_voice_channel_id is not None
-            else config.main_voice_channel_id
-        )
-        team_a_vc_id = (
-            settings.team_a_voice_channel_id
-            if settings.team_a_voice_channel_id is not None
-            else config.team_a_voice_channel_id
-        )
-        team_b_vc_id = (
-            settings.team_b_voice_channel_id
-            if settings.team_b_voice_channel_id is not None
-            else config.team_b_voice_channel_id
-        )
+        queue_channel_id = config.queue_channel_id or settings.queue_channel_id
+        main_vc_id = config.main_voice_channel_id or settings.main_voice_channel_id
+        team_a_vc_id = config.team_a_voice_channel_id or settings.team_a_voice_channel_id
+        team_b_vc_id = config.team_b_voice_channel_id or settings.team_b_voice_channel_id
         self.db.update_queue_config(
             queue_channel_id=queue_channel_id,
             queue_message_id=(config.queue_message_id if queue_channel_id == config.queue_channel_id else 0),
@@ -2368,14 +2354,8 @@ class OverwatchBot(commands.Bot):
             team_b_voice_channel_id=team_b_vc_id,
         )
         modmail_config = self.db.get_modmail_config()
-        modmail_channel_id = (
-            settings.modmail_channel_id if settings.modmail_channel_id is not None else modmail_config.panel_channel_id
-        )
-        modmail_logs_channel_id = (
-            settings.modmail_logs_channel_id
-            if settings.modmail_logs_channel_id is not None
-            else modmail_config.logs_channel_id
-        )
+        modmail_channel_id = modmail_config.panel_channel_id or settings.modmail_channel_id
+        modmail_logs_channel_id = modmail_config.logs_channel_id or settings.modmail_logs_channel_id
         self.db.update_modmail_config(
             panel_channel_id=modmail_channel_id,
             panel_message_id=(
