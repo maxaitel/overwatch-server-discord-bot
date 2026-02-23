@@ -21,22 +21,14 @@ from .storage import Database
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ow-bot")
 
-QUEUE_MODE_CHOICES = [
-    app_commands.Choice(name="Role Queue", value="role"),
-    app_commands.Choice(name="Open Queue", value="open"),
-]
 RESULT_TEAM_CHOICES = [
     app_commands.Choice(name="Team A", value="Team A"),
     app_commands.Choice(name="Team B", value="Team B"),
     app_commands.Choice(name="Draw", value="Draw"),
 ]
 TEST_SCENARIO_CHOICES = [
-    app_commands.Choice(name="Role standard full", value="role_standard"),
-    app_commands.Choice(name="Role with fill", value="role_with_fill"),
-    app_commands.Choice(name="Role all fill", value="role_all_fill"),
-    app_commands.Choice(name="Role fallback test", value="role_fallback"),
-    app_commands.Choice(name="Role partial", value="role_partial"),
-    app_commands.Choice(name="Open full", value="open_full"),
+    app_commands.Choice(name="Queue Full", value="queue_full"),
+    app_commands.Choice(name="Queue Partial", value="queue_partial"),
 ]
 TEST_RESULT_MODE_CHOICES = [
     app_commands.Choice(name="Team A wins", value="team_a"),
@@ -45,15 +37,40 @@ TEST_RESULT_MODE_CHOICES = [
     app_commands.Choice(name="All draws", value="draw"),
     app_commands.Choice(name="Clear results", value="clear"),
 ]
-TEST_ROLE_CHOICES = [
-    app_commands.Choice(name="Tank", value="tank"),
-    app_commands.Choice(name="DPS", value="dps"),
-    app_commands.Choice(name="Support", value="support"),
-    app_commands.Choice(name="Fill", value="fill"),
-    app_commands.Choice(name="Open", value="open"),
-]
 TEST_BOT_ID_BASE = 980_000_000_000_000_000
 RESULT_EMBED_TITLE_RE = re.compile(r"^Match #(\d+) Completed$")
+QUEUE_ENTRY_ROLE = "queue"
+MAP_POOL = [
+    "Antarctic Peninsula",
+    "Busan",
+    "Ilios",
+    "Lijiang Tower",
+    "Nepal",
+    "Oasis",
+    "Samoa",
+    "Circuit Royal",
+    "Dorado",
+    "Havana",
+    "Junkertown",
+    "Rialto",
+    "Route 66",
+    "Shambali Monastery",
+    "Watchpoint: Gibraltar",
+    "Blizzard World",
+    "Eichenwalde",
+    "Hollywood",
+    "King's Row",
+    "Midtown",
+    "Numbani",
+    "Paraiso",
+    "Colosseo",
+    "Esperanca",
+    "New Queen Street",
+    "New Junk City",
+    "Suravasa",
+    "Hanaoka",
+    "Throne of Anubis",
+]
 
 
 def _utc_now_iso() -> str:
@@ -82,21 +99,10 @@ def _channel_ref(channel_id: int | None) -> str:
     return f"<#{channel_id}>"
 
 
-def _format_player(player: AssignedPlayer) -> str:
-    role = player.assigned_role.upper()
-    return f"<@{player.discord_id}> | `{role}` | MMR `{player.mmr}`"
-
-
-def _format_team(team: Team) -> str:
-    lines = [_format_player(player) for player in team.players]
-    lines.append(f"Average MMR: `{team.average_mmr}`")
-    return "\n".join(lines)
-
-
 def _format_role_distribution(role_counts: dict[str, int]) -> str:
     if not role_counts:
         return "None"
-    ordered_roles = ["tank", "dps", "support", "fill", "open"]
+    ordered_roles = ["queue", "fill", "open", "tank", "dps", "support"]
     parts: list[str] = []
     for role in ordered_roles:
         count = role_counts.get(role)
@@ -139,44 +145,15 @@ def _is_ticket_staff(interaction: discord.Interaction) -> bool:
 
 
 class QueuePanelView(discord.ui.View):
-    def __init__(self, bot: OverwatchBot, config: QueueConfig) -> None:
+    def __init__(self, bot: OverwatchBot, _config: QueueConfig) -> None:
         super().__init__(timeout=None)
         self.bot = bot
-        is_open_queue = config.queue_mode == "open"
-        if is_open_queue:
-            self.remove_item(self.join_tank)
-            self.remove_item(self.join_dps)
-            self.remove_item(self.join_support)
-            self.remove_item(self.join_fill)
-        else:
-            self.remove_item(self.join_open)
 
-    @discord.ui.button(label="Join Tank", style=discord.ButtonStyle.secondary, custom_id="queue_join_tank", row=0)
-    async def join_tank(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
-        await self.bot.queue_service.handle_join(interaction, "tank")
+    @discord.ui.button(label="Join Queue", style=discord.ButtonStyle.secondary, custom_id="queue_join", row=0)
+    async def join_queue(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
+        await self.bot.queue_service.handle_join(interaction)
 
-    @discord.ui.button(label="Join DPS", style=discord.ButtonStyle.secondary, custom_id="queue_join_dps", row=0)
-    async def join_dps(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
-        await self.bot.queue_service.handle_join(interaction, "dps")
-
-    @discord.ui.button(
-        label="Join Support",
-        style=discord.ButtonStyle.secondary,
-        custom_id="queue_join_support",
-        row=0,
-    )
-    async def join_support(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
-        await self.bot.queue_service.handle_join(interaction, "support")
-
-    @discord.ui.button(label="Join Fill", style=discord.ButtonStyle.secondary, custom_id="queue_join_fill", row=0)
-    async def join_fill(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
-        await self.bot.queue_service.handle_join(interaction, "fill")
-
-    @discord.ui.button(label="Join Queue", style=discord.ButtonStyle.secondary, custom_id="queue_join_open", row=1)
-    async def join_open(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
-        await self.bot.queue_service.handle_join(interaction, "open")
-
-    @discord.ui.button(label="Leave Queue", style=discord.ButtonStyle.danger, custom_id="queue_leave", row=1)
+    @discord.ui.button(label="Leave Queue", style=discord.ButtonStyle.danger, custom_id="queue_leave", row=0)
     async def leave_queue(self, interaction: discord.Interaction, _: discord.ui.Button[QueuePanelView]) -> None:
         await self.bot.queue_service.handle_leave(interaction)
 
@@ -238,15 +215,13 @@ class BattleTagModal(discord.ui.Modal, title="Set BattleTag"):
         required=True,
     )
 
-    def __init__(self, bot: OverwatchBot, requested_role: str) -> None:
+    def __init__(self, bot: OverwatchBot) -> None:
         super().__init__(timeout=120)
         self.bot = bot
-        self.requested_role = requested_role
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self.bot.queue_service.handle_join_after_battletag(
             interaction,
-            requested_role=self.requested_role,
             battletag=str(self.battletag).strip(),
         )
 
@@ -846,8 +821,8 @@ class QueueService:
             return "None"
         lines = []
         for player in team.players:
-            lines.append(f"<@{player.discord_id}> - `{player.assigned_role.upper()}`, SR `{player.mmr}`")
-        lines.append(f"Average SR: `{team.average_mmr}`")
+            lines.append(f"<@{player.discord_id}> - MMR `{player.mmr}`")
+        lines.append(f"Average MMR: `{team.average_mmr}`")
         return "\n".join(lines)
 
     def _team_battletag_block(self, team: Team, battletags: dict[int, str | None]) -> str:
@@ -888,6 +863,12 @@ class QueueService:
         everyone = team_a_ids + team_b_ids
         return " ".join(f"<@{pid}>" for pid in everyone)
 
+    def _roll_map(self, *, exclude: str | None = None) -> str:
+        pool = [name for name in MAP_POOL if name != exclude]
+        if not pool:
+            pool = MAP_POOL
+        return random.choice(pool)
+
     async def _build_active_match_embed(self, active_match_id: int) -> discord.Embed | None:
         active = self.bot.db.get_active_match()
         if active is None or active.match_id != active_match_id:
@@ -903,8 +884,8 @@ class QueueService:
                     discord_id=int(p.get("discord_id", 0)),
                     display_name=str(p.get("display_name", "Unknown")),
                     mmr=int(p.get("mmr", 0)),
-                    preferred_role=str(p.get("preferred_role", "fill")),
-                    assigned_role=str(p.get("assigned_role", "fill")),
+                    preferred_role=str(p.get("preferred_role", QUEUE_ENTRY_ROLE)),
+                    assigned_role=str(p.get("assigned_role", QUEUE_ENTRY_ROLE)),
                 )
                 for p in team_a_payload
             ],
@@ -916,8 +897,8 @@ class QueueService:
                     discord_id=int(p.get("discord_id", 0)),
                     display_name=str(p.get("display_name", "Unknown")),
                     mmr=int(p.get("mmr", 0)),
-                    preferred_role=str(p.get("preferred_role", "fill")),
-                    assigned_role=str(p.get("assigned_role", "fill")),
+                    preferred_role=str(p.get("preferred_role", QUEUE_ENTRY_ROLE)),
+                    assigned_role=str(p.get("assigned_role", QUEUE_ENTRY_ROLE)),
                 )
                 for p in team_b_payload
             ],
@@ -941,6 +922,11 @@ class QueueService:
             color=discord.Color.orange() if active.status == "waiting_vc" else discord.Color.green(),
         )
         embed.timestamp = datetime.now(timezone.utc)
+        if active.status in {"live", "disputed"}:
+            map_value = f"`{active.map_name}`" if active.map_name else "`pending roll`"
+        else:
+            map_value = "Will roll automatically when the match goes live."
+        embed.add_field(name="Map", value=map_value, inline=False)
         embed.add_field(
             name="Voice Channels",
             value=(
@@ -1020,24 +1006,18 @@ class QueueService:
         return discord_id, display_name
 
     def _leaderboard_entries(self) -> list[dict[str, object]]:
-        rows = self.bot.db.list_role_rating_rows()
+        rows = self.bot.db.list_player_rating_rows()
         entries: list[dict[str, object]] = []
         for row in rows:
             games_played = int(row["games_played"])
             if games_played <= 0:
                 continue
             discord_id = int(row["discord_id"])
-            tank = int(row["tank_mmr"])
-            dps = int(row["dps_mmr"])
-            support = int(row["support_mmr"])
             entries.append(
                 {
                     "discord_id": discord_id,
                     "display_name": str(row["display_name"]),
-                    "tank_sr": tank,
-                    "dps_sr": dps,
-                    "support_sr": support,
-                    "global_sr": tank + dps + support,
+                    "mmr": int(row["mmr"]),
                     "games_played": games_played,
                 }
             )
@@ -1046,20 +1026,12 @@ class QueueService:
 
     def _render_leaderboard_image(self, *, limit: int = 10) -> BytesIO:
         entries = self._leaderboard_entries()
-        sorted_boards = {
-            "Global": sorted(entries, key=lambda item: (-int(item["global_sr"]), str(item["display_name"]).lower(), int(item["discord_id"])))[:limit],
-            "Tank": sorted(entries, key=lambda item: (-int(item["tank_sr"]), str(item["display_name"]).lower(), int(item["discord_id"])))[:limit],
-            "DPS": sorted(entries, key=lambda item: (-int(item["dps_sr"]), str(item["display_name"]).lower(), int(item["discord_id"])))[:limit],
-            "Support": sorted(entries, key=lambda item: (-int(item["support_sr"]), str(item["display_name"]).lower(), int(item["discord_id"])))[:limit],
-        }
-        key_by_board = {
-            "Global": "global_sr",
-            "Tank": "tank_sr",
-            "DPS": "dps_sr",
-            "Support": "support_sr",
-        }
+        ranked = sorted(
+            entries,
+            key=lambda item: (-int(item["mmr"]), str(item["display_name"]).lower(), int(item["discord_id"])),
+        )[:limit]
 
-        image = Image.new("RGB", (1500, 1080), (14, 18, 26))
+        image = Image.new("RGB", (1200, 980), (14, 18, 26))
         draw = ImageDraw.Draw(image)
         title_font = _load_font(52, bold=True)
         section_font = _load_font(34, bold=True)
@@ -1067,56 +1039,46 @@ class QueueService:
         value_font = _load_font(28, bold=True)
         sub_font = _load_font(22)
 
-        draw.text((44, 24), "In-House Leaderboard", fill=(235, 240, 250), font=title_font)
+        draw.text((44, 24), "In-House Leaderboard (Queue)", fill=(235, 240, 250), font=title_font)
         draw.text((46, 84), f"Updated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}", fill=(130, 145, 170), font=sub_font)
 
-        margin_x = 40
-        top = 130
-        gap = 28
-        panel_w = (1500 - (margin_x * 2) - gap) // 2
-        panel_h = (1080 - top - 40 - gap) // 2
-        panels = [
-            ("Global", margin_x, top),
-            ("Tank", margin_x + panel_w + gap, top),
-            ("DPS", margin_x, top + panel_h + gap),
-            ("Support", margin_x + panel_w + gap, top + panel_h + gap),
-        ]
+        x = 40
+        y = 130
+        panel_w = 1120
+        panel_h = 800
 
         def _text_width(text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
             box = draw.textbbox((0, 0), text, font=font)
             return box[2] - box[0]
 
-        for board_name, x, y in panels:
-            draw.rounded_rectangle(
-                (x, y, x + panel_w, y + panel_h),
-                radius=18,
-                fill=(22, 30, 43),
-                outline=(52, 74, 108),
-                width=2,
+        draw.rounded_rectangle(
+            (x, y, x + panel_w, y + panel_h),
+            radius=18,
+            fill=(22, 30, 43),
+            outline=(52, 74, 108),
+            width=2,
+        )
+        draw.text((x + 22, y + 16), f"Top {limit} by MMR", fill=(220, 235, 255), font=section_font)
+        row_y = y + 78
+        row_step = 36
+        if not ranked:
+            draw.text((x + 22, row_y), "No players yet.", fill=(150, 165, 190), font=row_font)
+        for rank, entry in enumerate(ranked, start=1):
+            name = str(entry["display_name"]).strip() or f"User {int(entry['discord_id'])}"
+            if len(name) > 28:
+                name = f"{name[:27]}..."
+            games = int(entry["games_played"])
+            left_text = f"{rank:>2}. {name}  ({games} games)"
+            mmr_value = int(entry["mmr"])
+            right_text = f"{mmr_value}"
+            draw.text((x + 22, row_y), left_text, fill=(230, 235, 245), font=row_font)
+            draw.text(
+                (x + panel_w - 22 - _text_width(right_text, value_font), row_y),
+                right_text,
+                fill=(120, 205, 255),
+                font=value_font,
             )
-            draw.text((x + 22, y + 16), f"{board_name} Top 10", fill=(220, 235, 255), font=section_font)
-            rows_for_board = sorted_boards[board_name]
-            stat_key = key_by_board[board_name]
-            row_y = y + 72
-            row_step = 36
-            if not rows_for_board:
-                draw.text((x + 22, row_y), "No players yet.", fill=(150, 165, 190), font=row_font)
-                continue
-            for rank, entry in enumerate(rows_for_board, start=1):
-                name = str(entry["display_name"]).strip() or f"User {int(entry['discord_id'])}"
-                if len(name) > 22:
-                    name = f"{name[:21]}..."
-                left_text = f"{rank:>2}. {name}"
-                sr_value = int(entry[stat_key])
-                right_text = f"{sr_value}"
-                draw.text((x + 22, row_y), left_text, fill=(230, 235, 245), font=row_font)
-                draw.text(
-                    (x + panel_w - 22 - _text_width(right_text, value_font), row_y),
-                    right_text,
-                    fill=(120, 205, 255),
-                    font=value_font,
-                )
-                row_y += row_step
+            row_y += row_step
 
         output = BytesIO()
         image.save(output, format="PNG")
@@ -1186,101 +1148,39 @@ class QueueService:
         except discord.DiscordException as exc:
             logger.warning("Unable to post leaderboard image: %s", exc)
 
-    def _seed_test_roles(self, roles: list[str]) -> int:
+    def _seed_test_players(self, count: int) -> int:
         created = 0
-        for index, role in enumerate(roles, start=1):
-            discord_id, display_name = self._next_test_player(role)
+        for index in range(1, count + 1):
+            discord_id, display_name = self._next_test_player(QUEUE_ENTRY_ROLE)
             mmr = 2200 + ((index * 53) % 700)
             self.bot.db.upsert_player(
                 discord_id=discord_id,
                 display_name=display_name,
                 mmr=mmr,
-                preferred_role=role if role in {"tank", "dps", "support", "fill"} else "fill",
+                preferred_role=QUEUE_ENTRY_ROLE,
             )
-            self.bot.db.upsert_queue_entry(discord_id, role)
+            self.bot.db.upsert_queue_entry(discord_id, QUEUE_ENTRY_ROLE)
             created += 1
         return created
 
-    def _scenario_standard_roles(self, config: QueueConfig) -> list[str]:
-        roles: list[str] = []
-        roles.extend(["tank"] * (config.tank_per_team * 2))
-        roles.extend(["dps"] * (config.dps_per_team * 2))
-        roles.extend(["support"] * (config.support_per_team * 2))
-        if len(roles) < config.players_per_match:
-            roles.extend(["fill"] * (config.players_per_match - len(roles)))
-        return roles[: config.players_per_match]
+    def _build_test_scenario_count(self, config: QueueConfig, scenario: str) -> int:
+        if scenario == "queue_full":
+            return config.players_per_match
 
-    def _build_test_scenario(self, config: QueueConfig, scenario: str) -> tuple[str, list[str]]:
-        standard_roles = self._scenario_standard_roles(config)
-
-        if scenario == "role_standard":
-            return "role", standard_roles
-
-        if scenario == "role_with_fill":
-            roles = list(standard_roles)
-            for preferred in ("tank", "dps", "support"):
-                if preferred in roles:
-                    roles[roles.index(preferred)] = "fill"
-                    break
-            return "role", roles
-
-        if scenario == "role_all_fill":
-            return "role", ["fill"] * config.players_per_match
-
-        if scenario == "role_fallback":
-            dps_count = config.players_per_match // 2
-            support_count = config.players_per_match - dps_count
-            return "role", (["dps"] * dps_count) + (["support"] * support_count)
-
-        if scenario == "role_partial":
-            target = max(config.players_per_match - 1, 1)
-            return "role", standard_roles[:target]
-
-        if scenario == "open_full":
-            return "open", ["open"] * config.players_per_match
+        if scenario == "queue_partial":
+            return max(config.players_per_match - 1, 1)
 
         raise ValueError("Unknown test scenario.")
 
     def build_embed(self, config: QueueConfig) -> discord.Embed:
         queued = self.bot.db.list_queue()
         total = len(queued)
-        queue_mode_label = "Role Queue" if config.queue_mode == "role" else "Open Queue"
         embed = discord.Embed(
             title="In-House Queue",
-            description=f"`{queue_mode_label}` • `{total}/{config.players_per_match}` queued",
+            description=f"`{total}/{config.players_per_match}` queued",
             color=discord.Color.blue(),
         )
-
-        if config.queue_mode == "role":
-            role_groups: dict[str, list[QueuedPlayer]] = {"tank": [], "dps": [], "support": [], "fill": []}
-            for player in queued:
-                role = player.role if player.role in role_groups else "fill"
-                role_groups[role].append(player)
-
-            caps = config.role_caps_total()
-
-            embed.add_field(
-                name=f"Tank ({len(role_groups['tank'])}/{caps.get('tank', 0)})",
-                value=self._mention_list(role_groups["tank"]),
-                inline=False,
-            )
-            embed.add_field(
-                name=f"DPS ({len(role_groups['dps'])}/{caps.get('dps', 0)})",
-                value=self._mention_list(role_groups["dps"]),
-                inline=False,
-            )
-            embed.add_field(
-                name=f"Support ({len(role_groups['support'])}/{caps.get('support', 0)})",
-                value=self._mention_list(role_groups["support"]),
-                inline=False,
-            )
-            embed.add_field(
-                name=f"Fill ({len(role_groups['fill'])}/{caps.get('fill', config.players_per_match)})",
-                value=self._mention_list(role_groups["fill"]),
-                inline=False,
-            )
-        else:
-            embed.add_field(name="Queued Players", value=self._mention_list(queued), inline=False)
+        embed.add_field(name="Queued Players", value=self._mention_list(queued), inline=False)
 
         return embed
 
@@ -1475,14 +1375,21 @@ class QueueService:
             can_start = True
 
         if can_start:
+            selected_map = active.map_name or self._roll_map()
             self.bot.db.increment_player_reliability(
                 no_show_ids=wrong_team_a + wrong_team_b,
                 disconnect_ids=disconnected_team_a + disconnected_team_b,
             )
-            self.bot.db.update_active_match(status="live", started_at=started_at, ready_deadline=None)
+            self.bot.db.update_active_match(
+                status="live",
+                map_name=selected_map,
+                started_at=started_at,
+                ready_deadline=None,
+            )
             auto_captain_id = await self._auto_assign_admin_captain(match_id, guild, all_ids)
             if not readiness_lines:
                 readiness_lines.append("All players are in their assigned voice channels.")
+            readiness_lines.insert(0, f"Map: `{selected_map}`")
             if auto_captain_id is not None:
                 readiness_lines.append(f"Admin in lobby detected. Lobby captain: <@{auto_captain_id}>.")
             else:
@@ -1517,6 +1424,7 @@ class QueueService:
         winner_team: str,
         started_at: str | None,
         finished_at: str,
+        map_name: str | None,
         changes: list[MatchMmrChange],
     ) -> discord.Embed:
         color = discord.Color.blurple() if winner_team == "Draw" else discord.Color.green()
@@ -1538,20 +1446,14 @@ class QueueService:
             ),
             inline=False,
         )
+        if map_name:
+            embed.add_field(name="Map", value=f"`{map_name}`", inline=True)
         if started_at:
             embed.add_field(name="Started", value=_discord_ts(started_at), inline=True)
         embed.add_field(name="Finished", value=_discord_ts(finished_at), inline=True)
         embed.add_field(name="Team A MMR", value=self._mmr_change_block(changes, "Team A"), inline=False)
         embed.add_field(name="Team B MMR", value=self._mmr_change_block(changes, "Team B"), inline=False)
         return embed
-
-    def _normalize_queue_role_for_mode(self, queue_mode: str, preferred_role: str | None) -> str:
-        if queue_mode == "open":
-            return "open"
-        candidate = (preferred_role or "fill").strip().lower()
-        if candidate in {"tank", "dps", "support", "fill"}:
-            return candidate
-        return "fill"
 
     def _build_match_cancelled_embed(
         self,
@@ -1587,7 +1489,6 @@ class QueueService:
             teams = self.bot.db.get_match_teams(active.match_id)
             requeued = 0
             if requeue_players and teams is not None:
-                queue_mode = self.bot.db.get_queue_config().queue_mode
                 for payload in teams:
                     for entry in payload:
                         try:
@@ -1597,7 +1498,7 @@ class QueueService:
                         if discord_id <= 0:
                             continue
                         display_name = str(entry.get("display_name", f"User {discord_id}"))
-                        preferred_role = str(entry.get("preferred_role", "fill"))
+                        preferred_role = str(entry.get("preferred_role", QUEUE_ENTRY_ROLE))
                         try:
                             mmr_value = int(entry.get("mmr", self.bot.settings.default_mmr))
                         except (TypeError, ValueError):
@@ -1606,10 +1507,9 @@ class QueueService:
                             discord_id=discord_id,
                             display_name=display_name,
                             mmr=mmr_value,
-                            preferred_role=preferred_role,
+                            preferred_role=QUEUE_ENTRY_ROLE,
                         )
-                        target_role = self._normalize_queue_role_for_mode(queue_mode, preferred_role)
-                        changed, _ = self.bot.db.upsert_queue_entry(discord_id, target_role)
+                        changed, _ = self.bot.db.upsert_queue_entry(discord_id, QUEUE_ENTRY_ROLE)
                         if changed:
                             requeued += 1
 
@@ -1678,6 +1578,7 @@ class QueueService:
             winner_team=winner_team,
             started_at=active.started_at,
             finished_at=finished_at,
+            map_name=active.map_name,
             changes=mmr_changes,
         )
 
@@ -1882,21 +1783,6 @@ class QueueService:
         except discord.DiscordException as exc:
             logger.warning("Unable to sync queue panel: %s", exc)
 
-    def _role_quota_for_match(self, config: QueueConfig) -> dict[str, int]:
-        return {
-            "tank": config.tank_per_team,
-            "dps": config.dps_per_team,
-            "support": config.support_per_team,
-        }
-
-    def _compose_match_message(self, match_id: int, config: QueueConfig, team_a: Team, team_b: Team, roles_enforced: bool) -> str:
-        roles_note = "role constraints enabled" if roles_enforced else "role constraints disabled (fallback)"
-        return (
-            f"**Match #{match_id} created** (`{config.queue_mode}` - {roles_note})\n\n"
-            f"**{team_a.name}**\n{_format_team(team_a)}\n\n"
-            f"**{team_b.name}**\n{_format_team(team_b)}"
-        )
-
     async def _start_match_if_ready(self) -> None:
         active = self.bot.db.get_active_match()
         if active is not None:
@@ -1908,14 +1794,12 @@ class QueueService:
             return
 
         selected = queued[: config.players_per_match]
-        enforce_roles = config.queue_mode == "role"
-        role_quota = self._role_quota_for_match(config) if enforce_roles else None
 
         try:
             result = make_match(
                 selected,
-                enforce_roles=enforce_roles,
-                role_quota_per_team=role_quota,
+                enforce_roles=False,
+                role_quota_per_team=None,
             )
         except Exception as exc:  # pragma: no cover - runtime guard
             logger.exception("Failed to create a match: %s", exc)
@@ -1924,7 +1808,7 @@ class QueueService:
         player_ids = [player.discord_id for player in selected]
         self.bot.db.dequeue_many(player_ids)
         match_id = self.bot.db.record_match(
-            mode=config.queue_mode,
+            mode=QUEUE_ENTRY_ROLE,
             team_a=result.team_a,
             team_b=result.team_b,
             roles_enforced=result.roles_enforced,
@@ -1960,11 +1844,13 @@ class QueueService:
             ready_prompt = f"Match #{match_id} formed. Join your team VC.\n{move_note}"
 
         message = await channel.send(f"{mentions}\n{ready_prompt}")
+        selected_map = self._roll_map()
         self.bot.db.set_active_match(
             match_id=match_id,
             channel_id=channel.id,
             message_id=message.id,
             status="live",
+            map_name=selected_map,
             ready_deadline=None,
             started_at=_utc_now_iso(),
             team_a_voice_channel_id=config.team_a_voice_channel_id,
@@ -1988,12 +1874,14 @@ class QueueService:
         if auto_captain_id is not None:
             self._active_match_updates[match_id] = (
                 "Match is now live.\n"
+                f"Map: `{selected_map}`\n"
                 f"{move_note}\n"
                 f"Admin captain auto-selected: <@{auto_captain_id}>."
             )
         else:
             self._active_match_updates[match_id] = (
                 "Match is now live.\n"
+                f"Map: `{selected_map}`\n"
                 f"{move_note}\n"
                 "First player to press `Claim Captain` becomes captain."
             )
@@ -2004,7 +1892,6 @@ class QueueService:
         self,
         interaction: discord.Interaction,
         *,
-        requested_role: str,
         battletag: str | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
@@ -2030,41 +1917,23 @@ class QueueService:
                 discord_id=user_id,
                 display_name=interaction.user.display_name,
                 battletag=normalized_battletag,
+                preferred_role=QUEUE_ENTRY_ROLE,
             )
-
-            target_role = "open" if config.queue_mode == "open" else requested_role
-            if config.queue_mode == "role":
-                if target_role not in {"tank", "dps", "support", "fill"}:
-                    await interaction.followup.send("Invalid role selection.", ephemeral=True)
-                    return
-            else:
-                target_role = "open"
 
             existing = self.bot.db.get_queue_entry(user_id)
             if existing is None and self.bot.db.queue_count() >= config.players_per_match:
                 await interaction.followup.send("Queue is currently full.", ephemeral=True)
                 return
 
-            if config.queue_mode == "role":
-                if existing is None or existing["role"] != target_role:
-                    role_cap = config.role_caps_total().get(target_role, 0)
-                    role_count = self.bot.db.count_role(target_role)
-                    if role_count >= role_cap:
-                        await interaction.followup.send(
-                            f"{target_role.title()} is currently full.",
-                            ephemeral=True,
-                        )
-                        return
-
-            changed, status = self.bot.db.upsert_queue_entry(user_id, target_role)
+            changed, status = self.bot.db.upsert_queue_entry(user_id, QUEUE_ENTRY_ROLE)
             if not changed:
-                await interaction.followup.send("You are already queued in that role.", ephemeral=True)
+                await interaction.followup.send("You are already in queue.", ephemeral=True)
                 return
 
-            if status == "role updated":
-                response_text = f"Queue role updated to `{target_role}`."
+            if status == "queue updated":
+                response_text = "Queue entry refreshed."
             else:
-                response_text = f"You joined the queue as `{target_role}`."
+                response_text = "You joined the queue."
 
             await self._start_match_if_ready()
             await self.sync_panel()
@@ -2074,26 +1943,24 @@ class QueueService:
         self,
         interaction: discord.Interaction,
         *,
-        requested_role: str,
         battletag: str,
     ) -> None:
         self._cancel_battletag_reminder(interaction.user.id)
         await self._handle_join_core(
             interaction,
-            requested_role=requested_role,
             battletag=battletag,
         )
 
-    async def handle_join(self, interaction: discord.Interaction, requested_role: str) -> None:
+    async def handle_join(self, interaction: discord.Interaction) -> None:
         player = self.bot.db.get_player(interaction.user.id)
         if player is None or not player.battletag:
             self._cancel_battletag_reminder(interaction.user.id)
-            await interaction.response.send_modal(BattleTagModal(self.bot, requested_role))
+            await interaction.response.send_modal(BattleTagModal(self.bot))
             self._battletag_reminder_tasks[interaction.user.id] = asyncio.create_task(
                 self._send_battletag_reminder(interaction, interaction.user.id)
             )
             return
-        await self._handle_join_core(interaction, requested_role=requested_role)
+        await self._handle_join_core(interaction)
 
     async def handle_claim_captain(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
@@ -2232,6 +2099,20 @@ class QueueService:
                 return True, "VC check forced and match moved to live."
             return False, "Unable to complete VC check. Verify active match channel and team VC setup."
 
+    async def admin_reroll_active_map(self, *, admin_id: int) -> tuple[bool, str]:
+        async with self.lock:
+            active = self.bot.db.get_active_match()
+            if active is None:
+                return False, "No active match."
+            if active.status not in {"live", "disputed"}:
+                return False, "Map reroll is only available once the match is live."
+
+            next_map = self._roll_map(exclude=active.map_name)
+            self.bot.db.update_active_match(map_name=next_map)
+            self._active_match_updates[active.match_id] = f"Map rerolled by <@{admin_id}>: `{next_map}`."
+            await self._sync_active_match_message()
+            return True, f"Map rerolled to `{next_map}`."
+
     async def admin_set_channel(self, channel_id: int) -> None:
         async with self.lock:
             self.bot.db.update_queue_config(queue_channel_id=channel_id, queue_message_id=0)
@@ -2298,29 +2179,16 @@ class QueueService:
             mode_label = "private" if enabled else "public"
             return True, f"Updated `{updated}` team VC(s) to `{mode_label}` mode."
 
-    async def admin_set_mode(self, queue_mode: str) -> None:
-        async with self.lock:
-            self.bot.db.update_queue_config(queue_mode=queue_mode)
-            if queue_mode == "open":
-                self.bot.db.set_all_queue_roles("open")
-            else:
-                self.bot.db.normalize_queue_roles_for_role_mode()
-            await self._start_match_if_ready()
-            await self.sync_panel()
-
     async def admin_set_rules(
         self,
         players_per_match: int,
-        tank_per_team: int,
-        dps_per_team: int,
-        support_per_team: int,
     ) -> None:
         async with self.lock:
             self.bot.db.update_queue_config(
                 players_per_match=players_per_match,
-                tank_per_team=tank_per_team,
-                dps_per_team=dps_per_team,
-                support_per_team=support_per_team,
+                tank_per_team=0,
+                dps_per_team=0,
+                support_per_team=0,
             )
             await self._start_match_if_ready()
             await self.sync_panel()
@@ -2331,36 +2199,25 @@ class QueueService:
             await self.sync_panel()
             return removed
 
-    async def admin_seed_test_scenario(self, scenario: str) -> tuple[str, int, int]:
+    async def admin_seed_test_scenario(self, scenario: str) -> tuple[int, int]:
         async with self.lock:
             config = self.bot.db.get_queue_config()
-            queue_mode, roles = self._build_test_scenario(config, scenario)
-            self.bot.db.update_queue_config(queue_mode=queue_mode)
+            target_count = self._build_test_scenario_count(config, scenario)
+            self.bot.db.update_queue_config(queue_mode=QUEUE_ENTRY_ROLE)
             self.bot.db.clear_queue()
-            added = self._seed_test_roles(roles)
+            added = self._seed_test_players(target_count)
             await self._start_match_if_ready()
             remaining = self.bot.db.queue_count()
             await self.sync_panel()
-            return queue_mode, added, remaining
+            return added, remaining
 
-    async def admin_add_test_players(self, role: str, count: int) -> tuple[str, int, int]:
+    async def admin_add_test_players(self, count: int) -> tuple[int, int]:
         async with self.lock:
-            config = self.bot.db.get_queue_config()
-            queue_mode = config.queue_mode
-            if queue_mode == "open":
-                if role != "open":
-                    raise ValueError("Current mode is open queue. Use role `open`.")
-                target_role = "open"
-            else:
-                if role == "open":
-                    raise ValueError("`open` test role can only be used in open queue mode.")
-                target_role = role
-
-            added = self._seed_test_roles([target_role] * count)
+            added = self._seed_test_players(count)
             await self._start_match_if_ready()
             remaining = self.bot.db.queue_count()
             await self.sync_panel()
-            return target_role, added, remaining
+            return added, remaining
 
     async def admin_apply_test_results(self, mode: str, count: int) -> tuple[int, int, int]:
         async with self.lock:
@@ -2619,35 +2476,14 @@ def register_commands(bot: OverwatchBot) -> None:
             return
         await interaction.followup.send(msg, ephemeral=True)
 
-    @bot.tree.command(name="queue_mode", description="Set queue mode (role queue or open queue).")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(mode="Queue mode")
-    @app_commands.choices(mode=QUEUE_MODE_CHOICES)
-    async def queue_admin_mode(
-        interaction: discord.Interaction,
-        mode: app_commands.Choice[str],
-    ) -> None:
-        if not _is_admin(interaction):
-            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        await bot.queue_service.admin_set_mode(mode.value)
-        await interaction.followup.send(f"Queue mode updated to `{mode.value}`.", ephemeral=True)
-
-    @bot.tree.command(name="queue_rules", description="Update players per match and role slots per team.")
+    @bot.tree.command(name="queue_rules", description="Update queue size needed to start a match.")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         players_per_match="Total players needed to start a match",
-        tank_per_team="Tank slots per team",
-        dps_per_team="DPS slots per team",
-        support_per_team="Support slots per team",
     )
     async def queue_admin_rules(
         interaction: discord.Interaction,
         players_per_match: int,
-        tank_per_team: int,
-        dps_per_team: int,
-        support_per_team: int,
     ) -> None:
         if not _is_admin(interaction):
             await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
@@ -2656,34 +2492,12 @@ def register_commands(bot: OverwatchBot) -> None:
         if players_per_match < 2 or players_per_match % 2 != 0:
             await interaction.response.send_message("players_per_match must be an even number greater than 1.", ephemeral=True)
             return
-        if tank_per_team < 0 or dps_per_team < 0 or support_per_team < 0:
-            await interaction.response.send_message("Role slots cannot be negative.", ephemeral=True)
-            return
-
-        team_size = players_per_match // 2
-        role_slots_per_team = tank_per_team + dps_per_team + support_per_team
-        if role_slots_per_team > team_size:
-            await interaction.response.send_message(
-                "Per-team role slots exceed team size. Reduce role slots or increase players_per_match.",
-                ephemeral=True,
-            )
-            return
 
         await interaction.response.defer(ephemeral=True, thinking=False)
         await bot.queue_service.admin_set_rules(
             players_per_match=players_per_match,
-            tank_per_team=tank_per_team,
-            dps_per_team=dps_per_team,
-            support_per_team=support_per_team,
         )
-        await interaction.followup.send(
-            (
-                f"Queue rules updated: players_per_match `{players_per_match}`, "
-                f"tank `{tank_per_team}`, dps `{dps_per_team}`, support `{support_per_team}`, "
-                "fill is always available until the queue is full."
-            ),
-            ephemeral=True,
-        )
+        await interaction.followup.send(f"Queue size updated: players_per_match `{players_per_match}`.", ephemeral=True)
 
     @bot.tree.command(name="queue_remove", description="Remove a player from queue.")
     @app_commands.default_permissions(manage_guild=True)
@@ -2740,7 +2554,7 @@ def register_commands(bot: OverwatchBot) -> None:
         history_lines = [
             (
                 f"#{entry.match_id} {entry.created_at} | {entry.mode} | {entry.team} | "
-                f"{entry.assigned_role} | mmr {entry.mmr} | result {entry.result}"
+                f"mmr {entry.mmr} | result {entry.result}"
             )
             for entry in history
         ]
@@ -2766,8 +2580,7 @@ def register_commands(bot: OverwatchBot) -> None:
                 f"DB ID: `{stats.discord_id}`\n"
                 f"Display Name: `{stats.display_name}`\n"
                 f"BattleTag: `{stats.battletag or 'not set'}`\n"
-                f"MMR: `{stats.mmr}`\n"
-                f"Preferred Role: `{stats.preferred_role}`"
+                f"MMR: `{stats.mmr}`"
             ),
             inline=False,
         )
@@ -2795,11 +2608,7 @@ def register_commands(bot: OverwatchBot) -> None:
             ),
             inline=True,
         )
-        stats_embed.add_field(
-            name="Role Usage",
-            value=f"`{_format_role_distribution(stats.assigned_role_counts)}`",
-            inline=False,
-        )
+        stats_embed.add_field(name="Queue Usage", value=f"`{_format_role_distribution(stats.assigned_role_counts)}`", inline=False)
         stats_embed.add_field(name="Recent Matches (max 5)", value=history_value, inline=False)
         await interaction.followup.send(embed=stats_embed, ephemeral=True)
 
@@ -2823,11 +2632,10 @@ def register_commands(bot: OverwatchBot) -> None:
         for row in rows:
             winner = row["winner_team"] or "unreported"
             reported_at = row["reported_at"] or "n/a"
-            roles_flag = "on" if int(row["roles_enforced"]) else "off"
             lines.append(
                 (
                     f"#{row['id']} | {row['created_at']} | mode `{row['mode']}` | "
-                    f"roles `{roles_flag}` | winner `{winner}` | reported `{reported_at}`"
+                    f"winner `{winner}` | reported `{reported_at}`"
                 )
             )
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
@@ -2888,6 +2696,19 @@ def register_commands(bot: OverwatchBot) -> None:
             return
         await interaction.followup.send(message, ephemeral=True)
 
+    @bot.tree.command(name="match_map_reroll", description="Reroll the active live match map.")
+    @app_commands.default_permissions(manage_guild=True)
+    async def match_map_reroll(interaction: discord.Interaction) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        ok, message = await bot.queue_service.admin_reroll_active_map(admin_id=interaction.user.id)
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
+            return
+        await interaction.followup.send(message, ephemeral=True)
+
     @bot.tree.command(name="queue_clear", description="Clear all queued players.")
     @app_commands.default_permissions(manage_guild=True)
     async def queue_admin_clear(interaction: discord.Interaction) -> None:
@@ -2924,11 +2745,11 @@ def register_commands(bot: OverwatchBot) -> None:
             await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=False)
-        queue_mode, added, remaining = await bot.queue_service.admin_seed_test_scenario(scenario.value)
+        added, remaining = await bot.queue_service.admin_seed_test_scenario(scenario.value)
         consumed = max(added - remaining, 0)
         await interaction.followup.send(
             (
-                f"Loaded test scenario `{scenario.value}` in `{queue_mode}` mode. "
+                f"Loaded test scenario `{scenario.value}`. "
                 f"Added `{added}` synthetic players. Queue now has `{remaining}` players. "
                 f"Auto-match consumed `{consumed}` players."
             ),
@@ -2937,11 +2758,9 @@ def register_commands(bot: OverwatchBot) -> None:
 
     @bot.tree.command(name="queue_admin_test_add", description="Add synthetic players to the current queue.")
     @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(role="Role for synthetic players", count="Number of synthetic players to add (1-50)")
-    @app_commands.choices(role=TEST_ROLE_CHOICES)
+    @app_commands.describe(count="Number of synthetic players to add (1-50)")
     async def queue_admin_test_add(
         interaction: discord.Interaction,
-        role: app_commands.Choice[str],
         count: int,
     ) -> None:
         if not _is_admin(interaction):
@@ -2952,15 +2771,11 @@ def register_commands(bot: OverwatchBot) -> None:
             return
 
         await interaction.response.defer(ephemeral=True, thinking=False)
-        try:
-            target_role, added, remaining = await bot.queue_service.admin_add_test_players(role.value, count)
-        except ValueError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-            return
+        added, remaining = await bot.queue_service.admin_add_test_players(count)
 
         await interaction.followup.send(
             (
-                f"Added `{added}` synthetic players as `{target_role}`. "
+                f"Added `{added}` synthetic players. "
                 f"Queue now has `{remaining}` players."
             ),
             ephemeral=True,

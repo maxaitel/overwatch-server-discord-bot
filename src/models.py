@@ -55,7 +55,7 @@ class MatchmakingResult:
 class QueueConfig:
     queue_channel_id: int | None
     queue_message_id: int | None
-    queue_mode: str  # "role" | "open"
+    queue_mode: str  # "queue"
     players_per_match: int
     tank_per_team: int
     dps_per_team: int
@@ -126,6 +126,7 @@ class ActiveMatch:
     channel_id: int
     message_id: int
     status: str  # waiting_vc | live | disputed
+    map_name: str | None
     ready_deadline: str | None
     started_at: str | None
     team_a_voice_channel_id: int | None

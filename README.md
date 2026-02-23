@@ -8,11 +8,7 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
 - Optional modmail panel lives in one configured text channel (`MODMAIL_CHANNEL_ID`).
 - Optional leaderboard panel lives in one configured text channel (`LEADERBOARD_CHANNEL_ID`).
 - Players do not use slash commands. They only use buttons:
-  - `Join Tank`
-  - `Join DPS`
-  - `Join Support`
-  - `Join Fill` (always available in role mode)
-  - `Join Queue` (open queue mode)
+  - `Join Queue`
   - `Leave Queue`
 - On first queue join, the bot asks the player for BattleTag and stores it.
 - If a user sends a message in the queue channel, the bot keeps the message and reposts the queue panel with the same state so the panel stays at the bottom.
@@ -27,15 +23,16 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
   - If players are in `MAIN_VOICE_CHANNEL_ID`, bot auto-moves them to their team VC at start.
   - If players are elsewhere, match still starts and waits for them normally.
   - Match lifecycle updates are written into the active match embed (reduced channel spam).
+  - When the match goes live, the bot rolls a random map from the map pool and shows it in the active embed.
+  - Admins can reroll that map with `/match_map_reroll`.
   - Active match embed includes BattleTags and team rosters.
-- Active match panel has `We Won`, `We Lost`, and `Claim Captain` buttons.
-- The first winner report is accepted immediately and finalizes the match.
-- Completed match embeds include a `Dispute Winner` button for admin review if the winner was reported incorrectly.
+  - Active match panel has `We Won`, `We Lost`, and `Claim Captain` buttons.
+  - The first winner report is accepted immediately and finalizes the match.
+  - Completed match embeds include a `Dispute Winner` button for admin review if the winner was reported incorrectly.
   - Dispute escalation does not use `@here`.
   - When result is finalized, the active panel is replaced with a clean match-complete summary showing winner and per-player MMR changes.
   - Leaderboard image auto-regenerates and reposts whenever match MMR updates.
 - Ready-check no-shows/disconnects are tracked per player in DB stats.
-- In role mode, `Fill` is a wildcard preference; fill players are assigned to missing Tank/DPS/Support slots during match creation.
 - New players get calibration MMR adjustments for their first 5 completed in-house matches (larger deltas), then normal Elo deltas apply.
 
 ## Admin Slash Commands
@@ -49,12 +46,7 @@ Most slash commands are intended for admins (`Manage Server`), except `/ticket_c
 - `/modmail_refresh` repost modmail panel
 - `/queue_vc` set main/team voice channels used for auto-move
 - `/vc_private` toggle Team A/Team B VC private mode for manual joins
-- `/queue_mode` switch between `role` and `open`
-- `/queue_rules` set:
-  - `players_per_match`
-  - `tank_per_team`
-  - `dps_per_team`
-  - `support_per_team`
+- `/queue_rules` set `players_per_match`
 - `/queue_remove` remove a specific player from queue
 - `/player_stats` show all stored DB stats for a player
 - `/recent_matches` list recent matches and result status
@@ -62,11 +54,12 @@ Most slash commands are intended for admins (`Manage Server`), except `/ticket_c
   - for the active match, this finalizes it immediately, posts the final summary, and attempts to start the next match if enough players are queued
 - `/match_cancel` cancel active match (optional player requeue)
 - `/match_remake` cancel active match, requeue players, and attempt immediate remake
+- `/match_map_reroll` reroll the current live match map
 - `/queue_clear` clear queue
 - `/queue_refresh` repost queue panel
 - `/ticket_close` close the current modmail ticket thread (ticket owner or staff)
 - `/queue_admin_test_scenario` load synthetic test scenarios
-- `/queue_admin_test_add` add synthetic test players by role
+- `/queue_admin_test_add` add synthetic test players
 - `/queue_admin_test_results` apply synthetic win/loss/draw patterns to recent matches
 
 ## Setup
@@ -154,8 +147,8 @@ Notes:
 - `TEAM_B_VOICE_CHANNEL_ID` (optional; Team B match voice channel)
 - `SQLITE_PATH` (default: `bot.db`)
 - `PLAYERS_PER_MATCH` (default: `10`, must be even)
-- `TANK_PER_TEAM` (default: `1`)
-- `DPS_PER_TEAM` (default: `2`)
-- `SUPPORT_PER_TEAM` (default: `2`)
+- `TANK_PER_TEAM` (legacy; ignored by queue flow)
+- `DPS_PER_TEAM` (legacy; ignored by queue flow)
+- `SUPPORT_PER_TEAM` (legacy; ignored by queue flow)
 - `DEFAULT_MMR` (default: `2500`, valid range: `0-5000`)
-- `DEFAULT_ROLE` (default: `flex`)
+- `DEFAULT_ROLE` (default: `queue`)
