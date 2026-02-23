@@ -148,6 +148,78 @@ class StorageMmrTests(unittest.TestCase):
         self.assertEqual(int(role_row["dps_mmr"]), 2512)
         self.assertEqual(int(role_row["support_mmr"]), 2500)
 
+    def test_recompute_match_mmr_changes_corrects_ratings_when_winner_changes(self) -> None:
+        match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
+        applied, changes, message = self.db.apply_match_mmr_changes(match_id, "Team A")
+        self.assertTrue(applied, message)
+        self.assertEqual(self._delta_for(changes, 101), 24)
+        self.assertEqual(self._delta_for(changes, 202), -24)
+
+        corrected, corrected_changes, correction_message = self.db.recompute_match_mmr_changes(match_id, "Team B")
+        self.assertTrue(corrected, correction_message)
+        self.assertEqual(correction_message, "mmr corrected for updated result")
+        self.assertEqual(self._delta_for(corrected_changes, 101), -24)
+        self.assertEqual(self._delta_for(corrected_changes, 202), 24)
+
+        player_a = self.db.get_player(101)
+        player_b = self.db.get_player(202)
+        self.assertIsNotNone(player_a)
+        self.assertIsNotNone(player_b)
+        self.assertEqual(int(player_a.mmr), 2476)
+        self.assertEqual(int(player_b.mmr), 2524)
+
+        role_row = self.db.conn.execute(
+            """
+            SELECT tank_mmr, dps_mmr, support_mmr
+            FROM player_role_mmr
+            WHERE discord_id = ?
+            """,
+            (101,),
+        ).fetchone()
+        self.assertIsNotNone(role_row)
+        self.assertEqual(int(role_row["tank_mmr"]), 2500)
+        self.assertEqual(int(role_row["dps_mmr"]), 2476)
+        self.assertEqual(int(role_row["support_mmr"]), 2500)
+
+    def test_recompute_match_mmr_changes_noop_when_result_already_matches(self) -> None:
+        match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
+        applied, changes, message = self.db.apply_match_mmr_changes(match_id, "Team A")
+        self.assertTrue(applied, message)
+
+        corrected, corrected_changes, correction_message = self.db.recompute_match_mmr_changes(match_id, "Team A")
+        self.assertTrue(corrected, correction_message)
+        self.assertEqual(correction_message, "mmr already matched result")
+        self.assertEqual(len(corrected_changes), len(changes))
+        self.assertEqual(self._delta_for(corrected_changes, 101), self._delta_for(changes, 101))
+        self.assertEqual(self._delta_for(corrected_changes, 202), self._delta_for(changes, 202))
+
+    def test_recompute_match_mmr_changes_uses_effective_delta_at_rating_cap(self) -> None:
+        match_id = self._record_one_vs_one_match(player_a_mmr=5000, player_b_mmr=5000, role="dps")
+        applied, initial_changes, message = self.db.apply_match_mmr_changes(match_id, "Team A", calibration_multiplier=1.0)
+        self.assertTrue(applied, message)
+        self.assertEqual(self._delta_for(initial_changes, 101), 12)
+        self.assertEqual(self._delta_for(initial_changes, 202), -12)
+
+        player_a_after_first = self.db.get_player(101)
+        player_b_after_first = self.db.get_player(202)
+        self.assertIsNotNone(player_a_after_first)
+        self.assertIsNotNone(player_b_after_first)
+        self.assertEqual(int(player_a_after_first.mmr), 5000)
+        self.assertEqual(int(player_b_after_first.mmr), 4988)
+
+        corrected, corrected_changes, correction_message = self.db.recompute_match_mmr_changes(match_id, "Team B", calibration_multiplier=1.0)
+        self.assertTrue(corrected, correction_message)
+        self.assertEqual(correction_message, "mmr corrected for updated result")
+        self.assertEqual(self._delta_for(corrected_changes, 101), -12)
+        self.assertEqual(self._delta_for(corrected_changes, 202), 12)
+
+        player_a_after_correction = self.db.get_player(101)
+        player_b_after_correction = self.db.get_player(202)
+        self.assertIsNotNone(player_a_after_correction)
+        self.assertIsNotNone(player_b_after_correction)
+        self.assertEqual(int(player_a_after_correction.mmr), 4988)
+        self.assertEqual(int(player_b_after_correction.mmr), 5000)
+
 
 if __name__ == "__main__":
     unittest.main()

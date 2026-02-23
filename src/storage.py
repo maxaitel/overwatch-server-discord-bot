@@ -681,6 +681,205 @@ class Database:
             )
         return True, "result saved"
 
+    def get_match_result(self, match_id: int) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT winner_team
+            FROM match_results
+            WHERE match_id = ?
+            """,
+            (match_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["winner_team"])
+
+    def recompute_match_mmr_changes(
+        self,
+        match_id: int,
+        winner_team: str,
+        *,
+        k_factor: int = DEFAULT_ELO_K_FACTOR,
+        calibration_matches: int = DEFAULT_CALIBRATION_MATCHES,
+        calibration_multiplier: float = DEFAULT_CALIBRATION_MULTIPLIER,
+    ) -> tuple[bool, list[MatchMmrChange], str]:
+        if winner_team not in VALID_WINNER_TEAMS:
+            return False, [], "invalid winner team"
+
+        existing_changes = self.get_match_mmr_changes(match_id)
+        if not existing_changes:
+            return False, [], "mmr not applied"
+
+        teams = self.get_match_teams(match_id)
+        if teams is None:
+            return False, [], "match not found"
+        team_a_payload, team_b_payload = teams
+        if not team_a_payload or not team_b_payload:
+            return False, [], "invalid match teams"
+
+        def _avg_mmr(payload: list[dict[str, object]]) -> int:
+            values: list[int] = []
+            for entry in payload:
+                try:
+                    values.append(self._clamp_sr(int(entry.get("mmr", self.default_mmr))))
+                except (TypeError, ValueError):
+                    continue
+            if not values:
+                return self.default_mmr
+            return round(sum(values) / len(values))
+
+        team_a_avg = _avg_mmr(team_a_payload)
+        team_b_avg = _avg_mmr(team_b_payload)
+
+        team_by_player_id: dict[int, str] = {}
+        assigned_role_by_player_id: dict[int, str] = {}
+        for team_name, payload in (("Team A", team_a_payload), ("Team B", team_b_payload)):
+            for entry in payload:
+                try:
+                    discord_id = int(entry.get("discord_id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if discord_id <= 0:
+                    continue
+                team_by_player_id[discord_id] = team_name
+                assigned_role_by_player_id[discord_id] = str(entry.get("assigned_role", "")).strip().lower()
+
+        role_column_map = {
+            "tank": "tank_mmr",
+            "dps": "dps_mmr",
+            "support": "support_mmr",
+        }
+        now = utc_now_iso()
+        adjusted_rows = 0
+
+        with self.conn:
+            for existing in existing_changes:
+                discord_id = existing.discord_id
+                team_name = team_by_player_id.get(discord_id, existing.team)
+                opponent_avg = team_b_avg if team_name == "Team A" else team_a_avg
+                if winner_team == "Draw":
+                    score = 0.5
+                else:
+                    score = 1.0 if winner_team == team_name else 0.0
+
+                expected = self._expected_score(existing.mmr_before, opponent_avg)
+                prior_games_row = self.conn.execute(
+                    """
+                    SELECT COUNT(*) AS games_played
+                    FROM match_mmr_changes
+                    WHERE discord_id = ?
+                      AND match_id < ?
+                    """,
+                    (discord_id, match_id),
+                ).fetchone()
+                prior_games = int(prior_games_row["games_played"]) if prior_games_row is not None else 0
+                multiplier = 1.0
+                if calibration_matches > 0 and calibration_multiplier > 1.0 and prior_games < calibration_matches:
+                    multiplier = calibration_multiplier
+                desired_delta = int(round(k_factor * (score - expected) * multiplier))
+                existing_effective_delta = int(existing.mmr_after) - int(existing.mmr_before)
+                desired_mmr_after = self._clamp_sr(int(existing.mmr_before) + desired_delta)
+                desired_effective_delta = desired_mmr_after - int(existing.mmr_before)
+                correction = desired_effective_delta - existing_effective_delta
+                if correction == 0:
+                    continue
+
+                player_row = self.conn.execute(
+                    """
+                    SELECT mmr
+                    FROM players
+                    WHERE discord_id = ?
+                    """,
+                    (discord_id,),
+                ).fetchone()
+                if player_row is not None:
+                    player_after = self._clamp_sr(int(player_row["mmr"]) + correction)
+                    self.conn.execute(
+                        """
+                        UPDATE players
+                        SET mmr = ?, updated_at = ?
+                        WHERE discord_id = ?
+                        """,
+                        (player_after, now, discord_id),
+                    )
+
+                self.conn.execute(
+                    """
+                    INSERT INTO player_role_mmr (discord_id, tank_mmr, dps_mmr, support_mmr, updated_at)
+                    SELECT discord_id, mmr, mmr, mmr, ?
+                    FROM players
+                    WHERE discord_id = ?
+                    ON CONFLICT(discord_id) DO NOTHING
+                    """,
+                    (now, discord_id),
+                )
+
+                role_column = role_column_map.get(assigned_role_by_player_id.get(discord_id, ""))
+                if role_column is not None:
+                    role_row = self.conn.execute(
+                        f"""
+                        SELECT {role_column}
+                        FROM player_role_mmr
+                        WHERE discord_id = ?
+                        """,
+                        (discord_id,),
+                    ).fetchone()
+                    if role_row is not None:
+                        role_after = self._clamp_sr(int(role_row[role_column]) + correction)
+                        self.conn.execute(
+                            f"""
+                            UPDATE player_role_mmr
+                            SET {role_column} = ?, updated_at = ?
+                            WHERE discord_id = ?
+                            """,
+                            (role_after, now, discord_id),
+                        )
+                else:
+                    role_row_all = self.conn.execute(
+                        """
+                        SELECT tank_mmr, dps_mmr, support_mmr
+                        FROM player_role_mmr
+                        WHERE discord_id = ?
+                        """,
+                        (discord_id,),
+                    ).fetchone()
+                    if role_row_all is not None:
+                        self.conn.execute(
+                            """
+                            UPDATE player_role_mmr
+                            SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
+                            WHERE discord_id = ?
+                            """,
+                            (
+                                self._clamp_sr(int(role_row_all["tank_mmr"]) + correction),
+                                self._clamp_sr(int(role_row_all["dps_mmr"]) + correction),
+                                self._clamp_sr(int(role_row_all["support_mmr"]) + correction),
+                                now,
+                                discord_id,
+                            ),
+                        )
+
+                self.conn.execute(
+                    """
+                    UPDATE match_mmr_changes
+                    SET delta = ?, mmr_after = ?
+                    WHERE match_id = ?
+                      AND discord_id = ?
+                    """,
+                    (
+                        desired_delta,
+                        desired_mmr_after,
+                        match_id,
+                        discord_id,
+                    ),
+                )
+                adjusted_rows += 1
+
+        updated_changes = self.get_match_mmr_changes(match_id)
+        if adjusted_rows == 0:
+            return True, updated_changes, "mmr already matched result"
+        return True, updated_changes, "mmr corrected for updated result"
+
     def clear_match_results(self) -> int:
         with self.conn:
             result = self.conn.execute(

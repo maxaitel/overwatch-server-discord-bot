@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 import logging
 import random
+import re
 
 import discord
 from discord import app_commands
@@ -52,6 +53,7 @@ TEST_ROLE_CHOICES = [
     app_commands.Choice(name="Open", value="open"),
 ]
 TEST_BOT_ID_BASE = 980_000_000_000_000_000
+RESULT_EMBED_TITLE_RE = re.compile(r"^Match #(\d+) Completed$")
 
 
 def _utc_now_iso() -> str:
@@ -185,7 +187,6 @@ class ActiveMatchView(discord.ui.View):
         bot: OverwatchBot,
         *,
         reports_locked: bool = False,
-        ready_enabled: bool = False,
         captain_claim_enabled: bool = False,
     ) -> None:
         super().__init__(timeout=None)
@@ -193,14 +194,8 @@ class ActiveMatchView(discord.ui.View):
         if reports_locked:
             self.we_won.disabled = True
             self.we_lost.disabled = True
-        if not ready_enabled:
-            self.ready_up.disabled = True
         if not captain_claim_enabled:
             self.remove_item(self.claim_captain)
-
-    @discord.ui.button(label="Ready Up", style=discord.ButtonStyle.primary, custom_id="active_match_ready_up", row=0)
-    async def ready_up(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
-        await self.bot.queue_service.handle_ready_up(interaction)
 
     @discord.ui.button(label="We Won", style=discord.ButtonStyle.success, custom_id="active_match_we_won", row=0)
     async def we_won(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
@@ -219,14 +214,19 @@ class ActiveMatchView(discord.ui.View):
     async def claim_captain(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
         await self.bot.queue_service.handle_claim_captain(interaction)
 
+
+class MatchResultView(discord.ui.View):
+    def __init__(self, bot: OverwatchBot) -> None:
+        super().__init__(timeout=None)
+        self.bot = bot
+
     @discord.ui.button(
-        label="Escalate Dispute",
+        label="Dispute Winner",
         style=discord.ButtonStyle.danger,
-        custom_id="active_match_escalate",
-        row=2,
+        custom_id="match_result_dispute",
     )
-    async def escalate(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
-        await self.bot.queue_service.handle_match_escalation(interaction)
+    async def dispute_winner(self, interaction: discord.Interaction, _: discord.ui.Button[MatchResultView]) -> None:
+        await self.bot.queue_service.handle_result_dispute(interaction)
 
 
 class BattleTagModal(discord.ui.Modal, title="Set BattleTag"):
@@ -736,13 +736,6 @@ class QueueService:
         team_a_payload, team_b_payload = teams
         return self._team_ids_from_payload(team_a_payload) + self._team_ids_from_payload(team_b_payload)
 
-    def _is_all_players_ready(self, match_id: int) -> bool:
-        player_ids = self._match_player_ids_from_db(match_id)
-        if not player_ids:
-            return False
-        ready_ids = set(self.bot.db.list_match_ready_ids(match_id))
-        return all(discord_id in ready_ids for discord_id in player_ids)
-
     async def _admin_ids_in_match(self, guild: discord.Guild, player_ids: list[int]) -> list[int]:
         admin_ids: list[int] = []
         for discord_id in player_ids:
@@ -767,29 +760,73 @@ class QueueService:
         )
         return chosen
 
-    def _format_report_line(self, report_row: object | None) -> str:
-        if report_row is None:
-            return "No report"
-        row = report_row
-        try:
-            winner = row["reported_winner_team"]
-            reporter = int(row["reporter_id"])
-            reported_at = _discord_ts(row["reported_at"])
-        except (KeyError, TypeError, ValueError):
-            return "Invalid report data"
-        return f"{winner} by <@{reporter}> ({reported_at})"
-
-    def _first_report_line(self, reports: dict[str, object]) -> str | None:
-        if "Team A" not in reports and "Team B" not in reports:
+    def _match_id_from_result_message(self, message: discord.Message | None) -> int | None:
+        if message is None or not message.embeds:
             return None
-        rows: list[tuple[str, object]] = []
-        if "Team A" in reports:
-            rows.append(("Team A", reports["Team A"]))
-        if "Team B" in reports:
-            rows.append(("Team B", reports["Team B"]))
-        rows.sort(key=lambda item: str(item[1]["reported_at"]))
-        first_team, first_row = rows[0]
-        return f"{first_team} by <@{int(first_row['reporter_id'])}> ({_discord_ts(first_row['reported_at'])})"
+        title = (message.embeds[0].title or "").strip()
+        match = RESULT_EMBED_TITLE_RE.match(title)
+        if match is None:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    def _updated_archived_result_embed(
+        self,
+        original: discord.Embed,
+        *,
+        winner_team: str,
+        changes: list[MatchMmrChange],
+    ) -> discord.Embed:
+        payload = original.to_dict()
+        payload["description"] = f"Result: `{winner_team}`"
+        payload["color"] = (
+            discord.Color.blurple().value if winner_team == "Draw" else discord.Color.green().value
+        )
+
+        team_a_total_delta = sum(change.delta for change in changes if change.team == "Team A")
+        team_b_total_delta = sum(change.delta for change in changes if change.team == "Team B")
+        fields = [field for field in payload.get("fields", []) if field.get("name") != "Dispute"]
+        for field in fields:
+            name = str(field.get("name", ""))
+            if name == "Summary":
+                field["value"] = (
+                    f"Team A total delta: `{_format_delta(team_a_total_delta)}`\n"
+                    f"Team B total delta: `{_format_delta(team_b_total_delta)}`"
+                )
+            elif name == "Team A MMR":
+                field["value"] = self._mmr_change_block(changes, "Team A")
+            elif name == "Team B MMR":
+                field["value"] = self._mmr_change_block(changes, "Team B")
+        payload["fields"] = fields
+        return discord.Embed.from_dict(payload)
+
+    async def _refresh_archived_result_message(self, match_id: int, winner_team: str) -> bool:
+        config = self.bot.db.get_queue_config()
+        channel = await self.resolve_queue_channel(config)
+        if channel is None:
+            return False
+
+        changes = self.bot.db.get_match_mmr_changes(match_id)
+        expected_title = f"Match #{match_id} Completed"
+        async for message in channel.history(limit=250):
+            if not message.embeds:
+                continue
+            title = (message.embeds[0].title or "").strip()
+            if title != expected_title:
+                continue
+            updated_embed = self._updated_archived_result_embed(
+                message.embeds[0],
+                winner_team=winner_team,
+                changes=changes,
+            )
+            try:
+                await message.edit(content=None, embed=updated_embed, view=MatchResultView(self.bot))
+                return True
+            except discord.DiscordException:
+                return False
+        return False
 
     def _summarize_missing_mentions(self, ids: list[int], *, limit: int = 4) -> str:
         if not ids:
@@ -801,54 +838,15 @@ class QueueService:
             return f"{mentions} +{remaining}"
         return mentions
 
-    def _build_vc_checklist_value(self, match_id: int) -> str:
-        status = self._vc_check_status.get(match_id)
-        if not status:
-            return "Pending ready check."
-
-        team_a_total = int(status.get("team_a_total", 0))
-        team_b_total = int(status.get("team_b_total", 0))
-        team_a_missing = list(status.get("team_a_missing", []))
-        team_b_missing = list(status.get("team_b_missing", []))
-        team_a_disconnected = int(status.get("team_a_disconnected", 0))
-        team_b_disconnected = int(status.get("team_b_disconnected", 0))
-        team_a_in = max(team_a_total - len(team_a_missing), 0)
-        team_b_in = max(team_b_total - len(team_b_missing), 0)
-        state = str(status.get("state", "pending"))
-
-        if state == "pending":
-            return (
-                f"Team A: `pending` (0/{team_a_total})\n"
-                f"Team B: `pending` (0/{team_b_total})"
-            )
-        if state == "unavailable":
-            return (
-                f"Team A: `snapshot unavailable` ({team_a_total} players)\n"
-                f"Team B: `snapshot unavailable` ({team_b_total} players)"
-            )
-
-        return (
-            f"Team A: `{team_a_in}/{team_a_total} in VC` | missing: {self._summarize_missing_mentions(team_a_missing)} | dc `{team_a_disconnected}`\n"
-            f"Team B: `{team_b_in}/{team_b_total} in VC` | missing: {self._summarize_missing_mentions(team_b_missing)} | dc `{team_b_disconnected}`"
-        )
-
-    def _target_vc_for_team(self, active: object, team_name: str) -> int | None:
-        if team_name == "Team A":
-            return getattr(active, "team_a_voice_channel_id", None)
-        return getattr(active, "team_b_voice_channel_id", None)
-
     def _all_match_player_ids(self, team_a: Team, team_b: Team) -> list[int]:
         return [player.discord_id for player in team_a.players] + [player.discord_id for player in team_b.players]
 
-    def _team_roster_block(self, team: Team, ready_ids: set[int]) -> str:
+    def _team_roster_block(self, team: Team) -> str:
         if not team.players:
             return "None"
         lines = []
         for player in team.players:
-            ready = "READY" if player.discord_id in ready_ids else "PENDING"
-            lines.append(
-                f"<@{player.discord_id}> - `{player.assigned_role.upper()}`, SR `{player.mmr}`, `{ready}`"
-            )
+            lines.append(f"<@{player.discord_id}> - `{player.assigned_role.upper()}`, SR `{player.mmr}`")
         lines.append(f"Average SR: `{team.average_mmr}`")
         return "\n".join(lines)
 
@@ -926,11 +924,6 @@ class QueueService:
         )
         all_player_ids = self._all_match_player_ids(team_a, team_b)
         battletags = self.bot.db.get_player_battletags(all_player_ids)
-        ready_ids = set(self.bot.db.list_match_ready_ids(active.match_id))
-        all_ready = len(all_player_ids) > 0 and all(discord_id in ready_ids for discord_id in all_player_ids)
-        team_a_ready = sum(1 for player in team_a.players if player.discord_id in ready_ids)
-        team_b_ready = sum(1 for player in team_b.players if player.discord_id in ready_ids)
-
         status_label = {
             "waiting_vc": "Waiting For VC Check",
             "live": "Live",
@@ -943,7 +936,7 @@ class QueueService:
             title=f"Active Match #{active.match_id}",
             description=(
                 f"Phase: `{status_label}`\n"
-                f"Ready: `{len(ready_ids)}/{len(all_player_ids)}` | Reports: `{report_count}/2`"
+                f"Players: `{len(all_player_ids)}` | Reports: `{report_count}/1`"
             ),
             color=discord.Color.orange() if active.status == "waiting_vc" else discord.Color.green(),
         )
@@ -957,13 +950,13 @@ class QueueService:
             inline=False,
         )
         embed.add_field(
-            name=f"Team A ({team_a_ready}/{len(team_a.players)} ready)",
-            value=self._team_roster_block(team_a, ready_ids),
+            name=f"Team A ({len(team_a.players)} players)",
+            value=self._team_roster_block(team_a),
             inline=False,
         )
         embed.add_field(
-            name=f"Team B ({team_b_ready}/{len(team_b.players)} ready)",
-            value=self._team_roster_block(team_b, ready_ids),
+            name=f"Team B ({len(team_b.players)} players)",
+            value=self._team_roster_block(team_b),
             inline=False,
         )
 
@@ -971,15 +964,8 @@ class QueueService:
             embed.add_field(name="Ready Check Deadline", value=_discord_ts(active.ready_deadline), inline=False)
         if active.started_at:
             embed.add_field(name="Started", value=_discord_ts(active.started_at), inline=False)
-        embed.add_field(
-            name="BattleTags",
-            value=("Visible below" if all_ready else "Hidden until all players are ready"),
-            inline=False,
-        )
-        if all_ready:
-            embed.add_field(name="Team A BattleTags", value=self._team_battletag_block(team_a, battletags), inline=False)
-            embed.add_field(name="Team B BattleTags", value=self._team_battletag_block(team_b, battletags), inline=False)
-        embed.add_field(name="VC Checklist", value=self._build_vc_checklist_value(active.match_id), inline=False)
+        embed.add_field(name="Team A BattleTags", value=self._team_battletag_block(team_a, battletags), inline=False)
+        embed.add_field(name="Team B BattleTags", value=self._team_battletag_block(team_b, battletags), inline=False)
 
         captain = self.bot.db.get_match_captain(active.match_id)
         if captain is not None:
@@ -990,31 +976,15 @@ class QueueService:
                 inline=False,
             )
         elif active.status in {"live", "disputed"}:
-            captain_text = "Captain selection unlocks when all players are ready."
-            if all_ready:
-                captain_text = "Captain selection is open. First match player to press `Claim Captain` becomes captain."
+            captain_text = "Captain selection is open. First match player to press `Claim Captain` becomes captain."
             embed.add_field(
                 name="Lobby Captain",
                 value=captain_text,
                 inline=False,
             )
 
-        team_a_report = reports.get("Team A")
-        team_b_report = reports.get("Team B")
-        first_report = self._first_report_line(reports)
-        report_section = (
-            f"Team A: {self._format_report_line(team_a_report)}\n"
-            f"Team B: {self._format_report_line(team_b_report)}"
-        )
-        if first_report:
-            report_section = f"{report_section}\nFirst report: {first_report}"
-        embed.add_field(name="Team Reports", value=report_section, inline=False)
-
         if active.escalated:
             embed.add_field(name="Dispute", value="Escalated to admins for resolution.", inline=False)
-        update_note = self._active_match_updates.get(active.match_id)
-        if update_note:
-            embed.add_field(name="Update", value=update_note, inline=False)
 
         return embed
 
@@ -1325,16 +1295,10 @@ class QueueService:
         if embed is None:
             return
         reports_locked = self._reports_complete(active.match_id) or active.status not in {"live", "disputed"}
-        ready_enabled = active.status == "waiting_vc"
-        captain_claim_enabled = (
-            active.status in {"live", "disputed"}
-            and self.bot.db.get_match_captain(active.match_id) is None
-            and self._is_all_players_ready(active.match_id)
-        )
+        captain_claim_enabled = active.status in {"live", "disputed"} and self.bot.db.get_match_captain(active.match_id) is None
         view = ActiveMatchView(
             self.bot,
             reports_locked=reports_locked,
-            ready_enabled=ready_enabled,
             captain_claim_enabled=captain_claim_enabled,
         )
 
@@ -1352,6 +1316,16 @@ class QueueService:
         active = self.bot.db.get_active_match()
         if active is None:
             return
+        if active.status == "waiting_vc":
+            # Legacy safety: older deployments may resume into waiting_vc, but this flow now starts matches live.
+            self.bot.db.update_active_match(
+                status="live",
+                started_at=(active.started_at or _utc_now_iso()),
+                ready_deadline=None,
+            )
+            refreshed = self.bot.db.get_active_match()
+            if refreshed is not None:
+                active = refreshed
         if active.match_id not in self._vc_check_status:
             teams = self.bot.db.get_match_teams(active.match_id)
             if teams is not None:
@@ -1518,7 +1492,7 @@ class QueueService:
             return True
 
         if not readiness_lines:
-            readiness_lines.append("Waiting for ready-up confirmations.")
+            readiness_lines.append("Waiting for voice channel checks.")
         self._active_match_updates[match_id] = "\n".join(readiness_lines)
         await self._sync_active_match_message()
         return False
@@ -1711,11 +1685,35 @@ class QueueService:
         if channel:
             try:
                 message = await channel.fetch_message(active.message_id)
-                await message.edit(content=None, embed=result_embed, view=None)
+                await message.edit(content=None, embed=result_embed, view=MatchResultView(self.bot))
             except discord.NotFound:
-                await channel.send(embed=result_embed)
+                await channel.send(embed=result_embed, view=MatchResultView(self.bot))
             except discord.DiscordException:
-                await channel.send(embed=result_embed)
+                await channel.send(embed=result_embed, view=MatchResultView(self.bot))
+
+            # QoL move: best-effort return match players from team VCs to main VC after result.
+            main_voice_channel_id = self.bot.db.get_queue_config().main_voice_channel_id
+            if main_voice_channel_id:
+                try:
+                    teams = self.bot.db.get_match_teams(match_id)
+                    if teams is not None:
+                        team_a_payload, team_b_payload = teams
+                        team_a_ids = self._team_ids_from_payload(team_a_payload)
+                        team_b_ids = self._team_ids_from_payload(team_b_payload)
+                        await self._move_members_from_main_vc(
+                            channel.guild,
+                            team_a_ids,
+                            active.team_a_voice_channel_id,
+                            main_voice_channel_id,
+                        )
+                        await self._move_members_from_main_vc(
+                            channel.guild,
+                            team_b_ids,
+                            active.team_b_voice_channel_id,
+                            main_voice_channel_id,
+                        )
+                except Exception:
+                    pass
 
         self.bot.db.clear_match_reports(match_id)
         self.bot.db.clear_match_ready(match_id)
@@ -1745,12 +1743,6 @@ class QueueService:
             if player_team is None:
                 await interaction.followup.send("You are not part of the active match.", ephemeral=True)
                 return
-            if self._reports_complete(active.match_id):
-                await interaction.followup.send(
-                    "Both team reports are already submitted. Ask admins to resolve with `/match_result` if needed.",
-                    ephemeral=True,
-                )
-                return
 
             if report_type == "win":
                 reported_winner = player_team
@@ -1770,34 +1762,14 @@ class QueueService:
                 await interaction.followup.send(msg, ephemeral=True)
                 return
 
-            reports = self.bot.db.get_match_reports(active.match_id)
-            report_a = reports.get("Team A")
-            report_b = reports.get("Team B")
-
-            if report_a and report_b:
-                winner_a = report_a["reported_winner_team"]
-                winner_b = report_b["reported_winner_team"]
-                if winner_a == winner_b:
-                    await self._finalize_active_match(active.match_id, winner_a)
-                    await interaction.followup.send("Both teams agreed on the result.", ephemeral=True)
-                    return
-
-                self.bot.db.update_active_match(status="disputed")
-                self._active_match_updates[active.match_id] = (
-                    "Result conflict detected. Players can use `Escalate Dispute` for admin review."
-                )
-                await self._sync_active_match_message()
-                await interaction.followup.send(
-                    "Conflict detected. If unresolved, press `Escalate Dispute`.",
-                    ephemeral=True,
-                )
-                return
-
-            await self._sync_active_match_message()
-            if msg == "report updated":
-                await interaction.followup.send("Your team report was updated.", ephemeral=True)
-                return
-            await interaction.followup.send("Your team report was recorded. Waiting for the other team report.", ephemeral=True)
+            await self._finalize_active_match(active.match_id, reported_winner)
+            await interaction.followup.send(
+                (
+                    f"Result submitted. Match finalized as `{reported_winner}`. "
+                    "If this is incorrect, press `Dispute Winner` on the result message."
+                ),
+                ephemeral=True,
+            )
 
     async def handle_match_escalation(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
@@ -1817,6 +1789,59 @@ class QueueService:
             )
             await self._sync_active_match_message()
             await interaction.followup.send("Dispute escalated to admins.", ephemeral=True)
+
+    async def handle_result_dispute(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        async with self.lock:
+            match_id = self._match_id_from_result_message(interaction.message)
+            if match_id is None:
+                await interaction.followup.send("Could not determine match ID from this result message.", ephemeral=True)
+                return
+
+            player_team = self.bot.db.get_player_team_for_match(match_id, interaction.user.id)
+            if player_team is None and not _is_admin(interaction):
+                await interaction.followup.send("Only match players or admins can dispute this winner.", ephemeral=True)
+                return
+
+            message = interaction.message
+            if message is None or not message.embeds:
+                await interaction.followup.send("Result message is unavailable.", ephemeral=True)
+                return
+
+            updated_embed = discord.Embed.from_dict(message.embeds[0].to_dict())
+            for field in updated_embed.fields:
+                if field.name == "Dispute":
+                    await interaction.followup.send(
+                        f"Dispute is already open for match `{match_id}`. Admins can resolve with `/match_result`.",
+                        ephemeral=True,
+                    )
+                    return
+
+            updated_embed.add_field(
+                name="Dispute",
+                value=(
+                    f"Opened by <@{interaction.user.id}> at {_discord_ts(_utc_now_iso())}.\n"
+                    f"Admins can resolve with `/match_result` using match ID `{match_id}`."
+                ),
+                inline=False,
+            )
+            try:
+                await message.edit(embed=updated_embed, view=MatchResultView(self.bot))
+            except discord.DiscordException as exc:
+                logger.warning("Unable to mark dispute on result message for match %s: %s", match_id, exc)
+                await interaction.followup.send(
+                    (
+                        f"I couldn't mark dispute status on the result embed for match `{match_id}`. "
+                        "Ask an admin to resolve with `/match_result`."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.followup.send(
+                f"Dispute opened for match `{match_id}`. Admins have been signaled on the result embed.",
+                ephemeral=True,
+            )
 
     async def sync_panel(self, *, repost: bool = False) -> None:
         config = self.bot.db.get_queue_config()
@@ -1913,37 +1938,65 @@ class QueueService:
         team_b_ids = [player.discord_id for player in result.team_b.players]
         mentions = self._active_match_mentions(team_a_ids, team_b_ids)
 
+        moved_a = await self._move_members_from_main_vc(
+            channel.guild,
+            team_a_ids,
+            config.main_voice_channel_id,
+            config.team_a_voice_channel_id,
+        )
+        moved_b = await self._move_members_from_main_vc(
+            channel.guild,
+            team_b_ids,
+            config.main_voice_channel_id,
+            config.team_b_voice_channel_id,
+        )
+        move_note = f"Auto-move attempted: Team A `{moved_a}`, Team B `{moved_b}`."
+
         if config.main_voice_channel_id:
             ready_prompt = (
-                f"Match #{match_id} formed. Join <#{config.main_voice_channel_id}> or your team VC, then press `Ready Up`."
+                f"Match #{match_id} formed. Join <#{config.main_voice_channel_id}> or your team VC.\n{move_note}"
             )
         else:
-            ready_prompt = f"Match #{match_id} formed. Join your team VC and press `Ready Up`."
+            ready_prompt = f"Match #{match_id} formed. Join your team VC.\n{move_note}"
 
         message = await channel.send(f"{mentions}\n{ready_prompt}")
         self.bot.db.set_active_match(
             match_id=match_id,
             channel_id=channel.id,
             message_id=message.id,
-            status="waiting_vc",
+            status="live",
             ready_deadline=None,
-            started_at=None,
+            started_at=_utc_now_iso(),
             team_a_voice_channel_id=config.team_a_voice_channel_id,
             team_b_voice_channel_id=config.team_b_voice_channel_id,
             escalated=False,
         )
         self._vc_check_status[match_id] = {
-            "state": "pending",
+            "state": "unavailable",
             "team_a_total": len(team_a_ids),
             "team_b_total": len(team_b_ids),
             "team_a_missing": [],
             "team_b_missing": [],
             "team_a_disconnected": 0,
             "team_b_disconnected": 0,
+            "moved_a": moved_a,
+            "moved_b": moved_b,
         }
         self.bot.db.clear_match_ready(match_id)
         self.bot.db.clear_match_captain(match_id)
-        self._active_match_updates[match_id] = "Match formed. Waiting for all players to ready up."
+        auto_captain_id = await self._auto_assign_admin_captain(match_id, channel.guild, team_a_ids + team_b_ids)
+        if auto_captain_id is not None:
+            self._active_match_updates[match_id] = (
+                "Match is now live.\n"
+                f"{move_note}\n"
+                f"Admin captain auto-selected: <@{auto_captain_id}>."
+            )
+        else:
+            self._active_match_updates[match_id] = (
+                "Match is now live.\n"
+                f"{move_note}\n"
+                "First player to press `Claim Captain` becomes captain."
+            )
         self.bot.db.clear_match_reports(match_id)
         await self._sync_active_match_message()
 
@@ -2042,89 +2095,6 @@ class QueueService:
             return
         await self._handle_join_core(interaction, requested_role=requested_role)
 
-    async def handle_ready_up(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        async with self.lock:
-            active = self.bot.db.get_active_match()
-            if active is None:
-                await interaction.followup.send("There is no active match.", ephemeral=True)
-                return
-            if active.status != "waiting_vc":
-                await interaction.followup.send("Ready-up is closed for this match.", ephemeral=True)
-                return
-
-            player_team = self.bot.db.get_player_team_for_match(active.match_id, interaction.user.id)
-            if player_team is None:
-                await interaction.followup.send("You are not part of the active match.", ephemeral=True)
-                return
-
-            channel = await self._resolve_text_channel_by_id(active.channel_id)
-            if channel is None:
-                await interaction.followup.send("Match channel is unavailable.", ephemeral=True)
-                return
-            guild = channel.guild
-            member = await self._safe_fetch_member(guild, interaction.user.id)
-            if member is None or member.voice is None or member.voice.channel is None:
-                await interaction.followup.send("Join voice before pressing ready.", ephemeral=True)
-                return
-
-            target_vc = self._target_vc_for_team(active, player_team)
-            config = self.bot.db.get_queue_config()
-            if target_vc:
-                if member.voice.channel.id == target_vc:
-                    pass
-                elif config.main_voice_channel_id and member.voice.channel.id == config.main_voice_channel_id:
-                    destination = guild.get_channel(target_vc)
-                    if isinstance(destination, discord.VoiceChannel):
-                        try:
-                            await member.move_to(destination)
-                        except discord.DiscordException:
-                            await interaction.followup.send(
-                                "Unable to move you to your team VC. Join your team VC and try again.",
-                                ephemeral=True,
-                            )
-                            return
-                    else:
-                        await interaction.followup.send("Team VC is not configured correctly.", ephemeral=True)
-                        return
-                else:
-                    await interaction.followup.send(
-                        "You must be in your assigned team VC (or in Main VC for auto-move) before readying up.",
-                        ephemeral=True,
-                    )
-                    return
-
-            changed, message = self.bot.db.set_match_ready(active.match_id, interaction.user.id)
-            if not changed:
-                await interaction.followup.send(f"You are already ready ({message}).", ephemeral=True)
-                return
-
-            ready_total = len(self.bot.db.list_match_ready_ids(active.match_id))
-            teams = self.bot.db.get_match_teams(active.match_id)
-            total_players = 0
-            if teams is not None:
-                total_players = len(self._team_ids_from_payload(teams[0])) + len(self._team_ids_from_payload(teams[1]))
-            all_ready = total_players > 0 and ready_total >= total_players
-
-            # Avoid expensive full VC scans on every ready click.
-            # Run the full check only once everyone has readied.
-            if not all_ready:
-                await self._sync_active_match_message()
-                await interaction.followup.send(
-                    f"Ready recorded ({ready_total}/{total_players}). Waiting for remaining players.",
-                    ephemeral=True,
-                )
-                return
-
-            started = await self._run_ready_check(active.match_id, force_start=False)
-            if started:
-                await interaction.followup.send("Ready recorded. Match is now live.", ephemeral=True)
-                return
-            await interaction.followup.send(
-                f"Ready recorded ({ready_total}/{total_players}). Waiting for remaining players and VC checks.",
-                ephemeral=True,
-            )
-
     async def handle_claim_captain(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
         async with self.lock:
@@ -2134,9 +2104,6 @@ class QueueService:
                 return
             if active.status not in {"live", "disputed"}:
                 await interaction.followup.send("Captain selection opens after match start.", ephemeral=True)
-                return
-            if not self._is_all_players_ready(active.match_id):
-                await interaction.followup.send("Captain selection is locked until all players are ready.", ephemeral=True)
                 return
 
             captain = self.bot.db.get_match_captain(active.match_id)
@@ -2203,6 +2170,7 @@ class QueueService:
 
     async def admin_force_result(self, match_id: int, winner_team: str) -> tuple[bool, str]:
         async with self.lock:
+            previous_winner = self.bot.db.get_match_result(match_id)
             changed, msg = self.bot.db.set_match_result(match_id, winner_team)
             if not changed and msg != "result already set to that value":
                 return False, f"Unable to set result: {msg}."
@@ -2213,15 +2181,37 @@ class QueueService:
                 return True, "Result saved and match finalized."
 
             applied, _, mmr_msg = self.bot.db.apply_match_mmr_changes(match_id, winner_team)
-            if not applied and mmr_msg != "mmr already applied":
-                return True, f"Result saved, but MMR update failed: {mmr_msg}."
+            mmr_note = ""
             if applied:
                 await self.sync_leaderboard_image(force=True)
+                mmr_note = "MMR updated."
+            elif mmr_msg == "mmr already applied":
+                if previous_winner is not None and previous_winner != winner_team:
+                    corrected, _, correction_msg = self.bot.db.recompute_match_mmr_changes(match_id, winner_team)
+                    if not corrected:
+                        return True, f"Result saved, but MMR correction failed: {correction_msg}."
+                    if correction_msg == "mmr corrected for updated result":
+                        await self.sync_leaderboard_image(force=True)
+                        mmr_note = "MMR corrected for updated result."
+                    else:
+                        mmr_note = "MMR already matched result."
+                else:
+                    mmr_note = "MMR already applied."
+            else:
+                return True, f"Result saved, but MMR update failed: {mmr_msg}."
+            embed_note = ""
+            if await self._refresh_archived_result_message(match_id, winner_team):
+                embed_note = " Result embed updated."
             if active and active.match_id != match_id:
-                return True, f"Result saved for archived match. Active match is `#{active.match_id}`."
-            if applied:
-                return True, "Result saved and MMR updated."
-            return True, "Result saved."
+                if mmr_note:
+                    return (
+                        True,
+                        f"Result saved for archived match. {mmr_note}{embed_note} Active match is `#{active.match_id}`.",
+                    )
+                return True, f"Result saved for archived match.{embed_note} Active match is `#{active.match_id}`."
+            if mmr_note:
+                return True, f"Result saved. {mmr_note}{embed_note}"
+            return True, f"Result saved.{embed_note}"
 
     async def admin_force_vc_check(self, *, assume_test_players_ready: bool = True) -> tuple[bool, str]:
         async with self.lock:
@@ -2458,6 +2448,7 @@ class OverwatchBot(commands.Bot):
         register_commands(self)
         self.add_view(ModmailPanelView(self))
         self.add_view(TicketThreadView(self))
+        self.add_view(MatchResultView(self))
         if self.settings.command_guild_id:
             guild = discord.Object(id=self.settings.command_guild_id)
             self.tree.copy_global_to(guild=guild)
@@ -2564,7 +2555,7 @@ def register_commands(bot: OverwatchBot) -> None:
         await bot.modmail_service.sync_panel(repost=True)
         await interaction.followup.send("Modmail panel refreshed.", ephemeral=True)
 
-    @bot.tree.command(name="queue_vc", description="Set main and team voice channels used for match start checks.")
+    @bot.tree.command(name="queue_vc", description="Set main and team voice channels used for auto-move.")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         main_vc="Main voice channel where queued players wait",
@@ -2610,20 +2601,6 @@ def register_commands(bot: OverwatchBot) -> None:
             ),
             ephemeral=True,
         )
-
-    @bot.tree.command(name="vc_finish", description="Force-finish the current VC check and start the match now.")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(assume_test_ready="Treat synthetic test players as already VC-ready")
-    async def vc_finish(interaction: discord.Interaction, assume_test_ready: bool = True) -> None:
-        if not _is_admin(interaction):
-            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True, thinking=False)
-        ok, msg = await bot.queue_service.admin_force_vc_check(assume_test_players_ready=assume_test_ready)
-        if not ok:
-            await interaction.followup.send(msg, ephemeral=True)
-            return
-        await interaction.followup.send(msg, ephemeral=True)
 
     @bot.tree.command(name="vc_private", description="Toggle private mode for Team A / Team B voice channels.")
     @app_commands.default_permissions(manage_guild=True)
