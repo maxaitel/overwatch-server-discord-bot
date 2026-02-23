@@ -922,11 +922,6 @@ class QueueService:
             color=discord.Color.orange() if active.status == "waiting_vc" else discord.Color.green(),
         )
         embed.timestamp = datetime.now(timezone.utc)
-        if active.status in {"live", "disputed"}:
-            map_value = f"`{active.map_name}`" if active.map_name else "`pending roll`"
-        else:
-            map_value = "Will roll automatically when the match goes live."
-        embed.add_field(name="Map", value=map_value, inline=False)
         embed.add_field(
             name="Voice Channels",
             value=(
@@ -952,6 +947,11 @@ class QueueService:
             embed.add_field(name="Started", value=_discord_ts(active.started_at), inline=False)
         embed.add_field(name="Team A BattleTags", value=self._team_battletag_block(team_a, battletags), inline=False)
         embed.add_field(name="Team B BattleTags", value=self._team_battletag_block(team_b, battletags), inline=False)
+        if active.status in {"live", "disputed"}:
+            map_value = f"`{active.map_name}`" if active.map_name else "`pending roll`"
+        else:
+            map_value = "Will roll automatically when the match goes live."
+        embed.add_field(name="Map", value=map_value, inline=False)
 
         captain = self.bot.db.get_match_captain(active.match_id)
         if captain is not None:
@@ -2211,13 +2211,15 @@ class QueueService:
             await self.sync_panel()
             return added, remaining
 
-    async def admin_add_test_players(self, count: int) -> tuple[int, int]:
+    async def admin_add_test_players(self, count: int) -> tuple[int, int, int]:
         async with self.lock:
+            before_count = self.bot.db.queue_count()
             added = self._seed_test_players(count)
             await self._start_match_if_ready()
             remaining = self.bot.db.queue_count()
+            consumed = max((before_count + added) - remaining, 0)
             await self.sync_panel()
-            return added, remaining
+            return added, remaining, consumed
 
     async def admin_apply_test_results(self, mode: str, count: int) -> tuple[int, int, int]:
         async with self.lock:
@@ -2733,7 +2735,7 @@ def register_commands(bot: OverwatchBot) -> None:
     async def ticket_close(interaction: discord.Interaction) -> None:
         await bot.modmail_service.handle_close_ticket(interaction)
 
-    @bot.tree.command(name="queue_admin_test_scenario", description="Load a test scenario with synthetic players.")
+    @bot.tree.command(name="queue_admin_test_scenario", description="Load a test scenario with test queue players.")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(scenario="Scenario to load")
     @app_commands.choices(scenario=TEST_SCENARIO_CHOICES)
@@ -2750,15 +2752,15 @@ def register_commands(bot: OverwatchBot) -> None:
         await interaction.followup.send(
             (
                 f"Loaded test scenario `{scenario.value}`. "
-                f"Added `{added}` synthetic players. Queue now has `{remaining}` players. "
+                f"Added `{added}` test players. Queue now has `{remaining}` players. "
                 f"Auto-match consumed `{consumed}` players."
             ),
             ephemeral=True,
         )
 
-    @bot.tree.command(name="queue_admin_test_add", description="Add synthetic players to the current queue.")
+    @bot.tree.command(name="queue_admin_test_add", description="Add test players to the current queue.")
     @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(count="Number of synthetic players to add (1-50)")
+    @app_commands.describe(count="Number of test queue players to add (1-50)")
     async def queue_admin_test_add(
         interaction: discord.Interaction,
         count: int,
@@ -2771,12 +2773,13 @@ def register_commands(bot: OverwatchBot) -> None:
             return
 
         await interaction.response.defer(ephemeral=True, thinking=False)
-        added, remaining = await bot.queue_service.admin_add_test_players(count)
+        added, remaining, consumed = await bot.queue_service.admin_add_test_players(count)
+        config = bot.db.get_queue_config()
 
         await interaction.followup.send(
             (
-                f"Added `{added}` synthetic players. "
-                f"Queue now has `{remaining}` players."
+                f"Added `{added}` test players. Queue now has `{remaining}/{config.players_per_match}` players. "
+                f"Auto-match consumed `{consumed}` players."
             ),
             ephemeral=True,
         )

@@ -58,9 +58,9 @@ Most slash commands are intended for admins (`Manage Server`), except `/ticket_c
 - `/queue_clear` clear queue
 - `/queue_refresh` repost queue panel
 - `/ticket_close` close the current modmail ticket thread (ticket owner or staff)
-- `/queue_admin_test_scenario` load synthetic test scenarios
-- `/queue_admin_test_add` add synthetic test players
-- `/queue_admin_test_results` apply synthetic win/loss/draw patterns to recent matches
+- `/queue_admin_test_scenario` load test scenarios
+- `/queue_admin_test_add` add test queue players
+- `/queue_admin_test_results` apply test win/loss/draw patterns to recent matches
 
 ## Setup
 
