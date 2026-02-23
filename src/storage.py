@@ -789,7 +789,6 @@ class Database:
         team_b_avg = _avg_mmr(team_b_payload)
 
         team_by_player_id: dict[int, str] = {}
-        assigned_role_by_player_id: dict[int, str] = {}
         for team_name, payload in (("Team A", team_a_payload), ("Team B", team_b_payload)):
             for entry in payload:
                 try:
@@ -799,13 +798,6 @@ class Database:
                 if discord_id <= 0:
                     continue
                 team_by_player_id[discord_id] = team_name
-                assigned_role_by_player_id[discord_id] = str(entry.get("assigned_role", "")).strip().lower()
-
-        role_column_map = {
-            "tank": "tank_mmr",
-            "dps": "dps_mmr",
-            "support": "support_mmr",
-        }
         now = utc_now_iso()
         adjusted_rows = 0
 
@@ -849,6 +841,7 @@ class Database:
                     """,
                     (discord_id,),
                 ).fetchone()
+                player_after = desired_mmr_after
                 if player_row is not None:
                     player_after = self._clamp_sr(int(player_row["mmr"]) + correction)
                     self.conn.execute(
@@ -871,50 +864,14 @@ class Database:
                     (now, discord_id),
                 )
 
-                role_column = role_column_map.get(assigned_role_by_player_id.get(discord_id, ""))
-                if role_column is not None:
-                    role_row = self.conn.execute(
-                        f"""
-                        SELECT {role_column}
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    if role_row is not None:
-                        role_after = self._clamp_sr(int(role_row[role_column]) + correction)
-                        self.conn.execute(
-                            f"""
-                            UPDATE player_role_mmr
-                            SET {role_column} = ?, updated_at = ?
-                            WHERE discord_id = ?
-                            """,
-                            (role_after, now, discord_id),
-                        )
-                else:
-                    role_row_all = self.conn.execute(
-                        """
-                        SELECT tank_mmr, dps_mmr, support_mmr
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    if role_row_all is not None:
-                        self.conn.execute(
-                            """
-                            UPDATE player_role_mmr
-                            SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
-                            WHERE discord_id = ?
-                            """,
-                            (
-                                self._clamp_sr(int(role_row_all["tank_mmr"]) + correction),
-                                self._clamp_sr(int(role_row_all["dps_mmr"]) + correction),
-                                self._clamp_sr(int(role_row_all["support_mmr"]) + correction),
-                                now,
-                                discord_id,
-                            ),
-                        )
+                self.conn.execute(
+                    """
+                    UPDATE player_role_mmr
+                    SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
+                    WHERE discord_id = ?
+                    """,
+                    (player_after, player_after, player_after, now, discord_id),
+                )
 
                 self.conn.execute(
                     """

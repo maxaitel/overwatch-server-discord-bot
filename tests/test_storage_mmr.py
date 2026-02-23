@@ -177,9 +177,9 @@ class StorageMmrTests(unittest.TestCase):
             (101,),
         ).fetchone()
         self.assertIsNotNone(role_row)
-        self.assertEqual(int(role_row["tank_mmr"]), 2500)
+        self.assertEqual(int(role_row["tank_mmr"]), 2476)
         self.assertEqual(int(role_row["dps_mmr"]), 2476)
-        self.assertEqual(int(role_row["support_mmr"]), 2500)
+        self.assertEqual(int(role_row["support_mmr"]), 2476)
 
     def test_recompute_match_mmr_changes_noop_when_result_already_matches(self) -> None:
         match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
