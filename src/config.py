@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 
 
-VALID_ROLES = {"tank", "dps", "support", "flex"}
+VALID_ROLES = {"queue"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,27 +64,18 @@ def load_settings() -> Settings:
     if players_per_match < 2 or players_per_match % 2 != 0:
         raise RuntimeError("PLAYERS_PER_MATCH must be an even number >= 2.")
 
-    tank_per_team = int(os.getenv("TANK_PER_TEAM", "1"))
-    dps_per_team = int(os.getenv("DPS_PER_TEAM", "2"))
-    support_per_team = int(os.getenv("SUPPORT_PER_TEAM", "2"))
-    if tank_per_team < 0 or dps_per_team < 0 or support_per_team < 0:
-        raise RuntimeError("Role slots per team cannot be negative.")
-
-    team_size = players_per_match // 2
-    role_slots_per_team = tank_per_team + dps_per_team + support_per_team
-    if role_slots_per_team > team_size:
-        raise RuntimeError(
-            "Role slots per team exceed team size. "
-            "Increase PLAYERS_PER_MATCH or reduce per-role values."
-        )
+    # Roles are disabled; keep these values for schema compatibility only.
+    tank_per_team = 0
+    dps_per_team = 0
+    support_per_team = 0
 
     default_mmr = int(os.getenv("DEFAULT_MMR", "2500"))
     if default_mmr < 0 or default_mmr > 5000:
         raise RuntimeError("DEFAULT_MMR must be between 0 and 5000.")
 
-    default_role = os.getenv("DEFAULT_ROLE", "flex").strip().lower() or "flex"
+    default_role = os.getenv("DEFAULT_ROLE", "queue").strip().lower() or "queue"
     if default_role not in VALID_ROLES:
-        default_role = "flex"
+        default_role = "queue"
 
     return Settings(
         discord_token=token,

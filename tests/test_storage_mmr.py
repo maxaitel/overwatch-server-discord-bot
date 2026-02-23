@@ -16,7 +16,7 @@ class StorageMmrTests(unittest.TestCase):
         self.db = Database(
             path=path,
             default_mmr=2500,
-            default_role="fill",
+            default_role="queue",
             default_players_per_match=2,
             default_tank_per_team=1,
             default_dps_per_team=0,
@@ -30,7 +30,7 @@ class StorageMmrTests(unittest.TestCase):
         except FileNotFoundError:
             pass
 
-    def _record_one_vs_one_match(self, *, player_a_mmr: int = 2500, player_b_mmr: int = 2500, role: str = "dps") -> int:
+    def _record_one_vs_one_match(self, *, player_a_mmr: int = 2500, player_b_mmr: int = 2500, role: str = "queue") -> int:
         self.db.upsert_player(discord_id=101, display_name="Alpha", mmr=player_a_mmr, preferred_role=role)
         self.db.upsert_player(discord_id=202, display_name="Bravo", mmr=player_b_mmr, preferred_role=role)
 
@@ -58,7 +58,7 @@ class StorageMmrTests(unittest.TestCase):
                 )
             ],
         )
-        return self.db.record_match(mode="role", team_a=team_a, team_b=team_b, roles_enforced=True)
+        return self.db.record_match(mode="queue", team_a=team_a, team_b=team_b, roles_enforced=False)
 
     @staticmethod
     def _delta_for(changes: list[object], discord_id: int) -> int:
@@ -69,7 +69,7 @@ class StorageMmrTests(unittest.TestCase):
 
     def _seed_completed_matches(self, count: int) -> None:
         for _ in range(count):
-            match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
+            match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="queue")
             applied, _, msg = self.db.apply_match_mmr_changes(match_id, "Team A", calibration_multiplier=1.0)
             self.assertTrue(applied, msg)
 
@@ -129,8 +129,8 @@ class StorageMmrTests(unittest.TestCase):
         self.assertEqual(second_msg, "mmr already applied")
         self.assertEqual(len(second_changes), len(first_changes))
 
-    def test_assigned_role_updates_only_that_role_bucket(self) -> None:
-        match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
+    def test_role_buckets_track_global_mmr(self) -> None:
+        match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="queue")
         applied, changes, message = self.db.apply_match_mmr_changes(match_id, "Team A", calibration_multiplier=1.0)
         self.assertTrue(applied, message)
         self.assertEqual(self._delta_for(changes, 101), 12)
@@ -144,9 +144,9 @@ class StorageMmrTests(unittest.TestCase):
             (101,),
         ).fetchone()
         self.assertIsNotNone(role_row)
-        self.assertEqual(int(role_row["tank_mmr"]), 2500)
+        self.assertEqual(int(role_row["tank_mmr"]), 2512)
         self.assertEqual(int(role_row["dps_mmr"]), 2512)
-        self.assertEqual(int(role_row["support_mmr"]), 2500)
+        self.assertEqual(int(role_row["support_mmr"]), 2512)
 
     def test_recompute_match_mmr_changes_corrects_ratings_when_winner_changes(self) -> None:
         match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")
@@ -177,9 +177,9 @@ class StorageMmrTests(unittest.TestCase):
             (101,),
         ).fetchone()
         self.assertIsNotNone(role_row)
-        self.assertEqual(int(role_row["tank_mmr"]), 2500)
+        self.assertEqual(int(role_row["tank_mmr"]), 2476)
         self.assertEqual(int(role_row["dps_mmr"]), 2476)
-        self.assertEqual(int(role_row["support_mmr"]), 2500)
+        self.assertEqual(int(role_row["support_mmr"]), 2476)
 
     def test_recompute_match_mmr_changes_noop_when_result_already_matches(self) -> None:
         match_id = self._record_one_vs_one_match(player_a_mmr=2500, player_b_mmr=2500, role="dps")

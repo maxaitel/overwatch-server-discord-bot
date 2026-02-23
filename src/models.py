@@ -1,11 +1,23 @@
 from dataclasses import dataclass
 
+HIGHEST_RANK_TIERS = (
+    "Champion",
+    "Grandmaster",
+    "Master",
+    "Diamond",
+    "Plat",
+    "Gold",
+    "Silver",
+    "Bronze",
+)
+
 
 @dataclass(slots=True)
 class Player:
     discord_id: int
     display_name: str
     battletag: str | None
+    highest_rank: str | None
     mmr: int
     preferred_role: str
 
@@ -55,7 +67,7 @@ class MatchmakingResult:
 class QueueConfig:
     queue_channel_id: int | None
     queue_message_id: int | None
-    queue_mode: str  # "role" | "open"
+    queue_mode: str  # "queue"
     players_per_match: int
     tank_per_team: int
     dps_per_team: int
@@ -104,6 +116,7 @@ class PlayerStats:
     discord_id: int
     display_name: str
     battletag: str | None
+    highest_rank: str | None
     mmr: int
     preferred_role: str
     updated_at: str
@@ -126,6 +139,7 @@ class ActiveMatch:
     channel_id: int
     message_id: int
     status: str  # waiting_vc | live | disputed
+    map_name: str | None
     ready_deadline: str | None
     started_at: str | None
     team_a_voice_channel_id: int | None

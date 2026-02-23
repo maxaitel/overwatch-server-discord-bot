@@ -18,8 +18,9 @@ from .models import (
     Team,
 )
 
-DEFAULT_QUEUE_MODE = "role"
+DEFAULT_QUEUE_MODE = "queue"
 DEFAULT_QUEUE_STATE_KEY = "default"
+DEFAULT_QUEUE_ENTRY_ROLE = "queue"
 VALID_WINNER_TEAMS = {"Team A", "Team B", "Draw"}
 VALID_ACTIVE_MATCH_STATUSES = {"waiting_vc", "live", "disputed"}
 MIN_SR = 0
@@ -56,9 +57,12 @@ class Database:
         self._create_schema()
         self._ensure_player_columns()
         self._ensure_queue_config_columns()
+        self._ensure_active_match_columns()
         self._ensure_modmail_config_columns()
         self._normalize_queue_state()
         self._ensure_queue_config_row()
+        self._normalize_queue_config_mode()
+        self._normalize_queue_entry_roles()
         self._ensure_modmail_config_row()
         self._ensure_player_role_mmr_rows()
 
@@ -77,6 +81,7 @@ class Database:
                     discord_id INTEGER PRIMARY KEY,
                     display_name TEXT NOT NULL,
                     battletag TEXT,
+                    highest_rank TEXT,
                     mmr INTEGER NOT NULL,
                     preferred_role TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -254,6 +259,13 @@ class Database:
             for row in self.conn.execute("PRAGMA table_info(players)").fetchall()
         }
         with self.conn:
+            if "highest_rank" not in columns:
+                self.conn.execute(
+                    """
+                    ALTER TABLE players
+                    ADD COLUMN highest_rank TEXT
+                    """
+                )
             if "no_show_count" not in columns:
                 self.conn.execute(
                     """
@@ -308,6 +320,20 @@ class Database:
                     """
                     ALTER TABLE modmail_config
                     ADD COLUMN logs_channel_id INTEGER
+                    """
+                )
+
+    def _ensure_active_match_columns(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.conn.execute("PRAGMA table_info(active_match)").fetchall()
+        }
+        with self.conn:
+            if "map_name" not in columns:
+                self.conn.execute(
+                    """
+                    ALTER TABLE active_match
+                    ADD COLUMN map_name TEXT
                     """
                 )
 
@@ -372,6 +398,31 @@ class Database:
                 """
             )
 
+    def _normalize_queue_config_mode(self) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE queue_config
+                SET queue_mode = ?,
+                    tank_per_team = 0,
+                    dps_per_team = 0,
+                    support_per_team = 0
+                WHERE id = 1
+                """,
+                (DEFAULT_QUEUE_MODE,),
+            )
+
+    def _normalize_queue_entry_roles(self) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE queue
+                SET role = ?
+                WHERE mode = ?
+                """,
+                (DEFAULT_QUEUE_ENTRY_ROLE, DEFAULT_QUEUE_STATE_KEY),
+            )
+
     def _normalize_queue_state(self) -> None:
         with self.conn:
             self.conn.execute(
@@ -390,12 +441,14 @@ class Database:
         discord_id: int,
         display_name: str,
         battletag: str | None = None,
+        highest_rank: str | None = None,
         mmr: int | None = None,
         preferred_role: str | None = None,
     ) -> None:
         now = utc_now_iso()
         current = self.get_player(discord_id)
         merged_battletag = battletag if battletag is not None else (current.battletag if current else None)
+        merged_highest_rank = highest_rank if highest_rank is not None else (current.highest_rank if current else None)
         merged_mmr_raw = mmr if mmr is not None else (current.mmr if current else self.default_mmr)
         merged_mmr = self._clamp_sr(int(merged_mmr_raw))
         merged_role = preferred_role if preferred_role is not None else (current.preferred_role if current else self.default_role)
@@ -403,16 +456,17 @@ class Database:
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO players (discord_id, display_name, battletag, mmr, preferred_role, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO players (discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     battletag = excluded.battletag,
+                    highest_rank = excluded.highest_rank,
                     mmr = excluded.mmr,
                     preferred_role = excluded.preferred_role,
                     updated_at = excluded.updated_at
                 """,
-                (discord_id, display_name, merged_battletag, merged_mmr, merged_role, now),
+                (discord_id, display_name, merged_battletag, merged_highest_rank, merged_mmr, merged_role, now),
             )
             self.conn.execute(
                 """
@@ -426,7 +480,7 @@ class Database:
     def get_player(self, discord_id: int) -> Player | None:
         row = self.conn.execute(
             """
-            SELECT discord_id, display_name, battletag, mmr, preferred_role
+            SELECT discord_id, display_name, battletag, highest_rank, mmr, preferred_role
             FROM players
             WHERE discord_id = ?
             """,
@@ -438,6 +492,7 @@ class Database:
             discord_id=row["discord_id"],
             display_name=row["display_name"],
             battletag=row["battletag"],
+            highest_rank=row["highest_rank"],
             mmr=row["mmr"],
             preferred_role=row["preferred_role"],
         )
@@ -561,7 +616,7 @@ class Database:
     def get_player_stats(self, discord_id: int) -> PlayerStats | None:
         player_row = self.conn.execute(
             """
-            SELECT discord_id, display_name, battletag, mmr, preferred_role, updated_at,
+            SELECT discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at,
                    no_show_count, disconnect_count
             FROM players
             WHERE discord_id = ?
@@ -596,6 +651,7 @@ class Database:
             discord_id=int(player_row["discord_id"]),
             display_name=player_row["display_name"],
             battletag=player_row["battletag"],
+            highest_rank=player_row["highest_rank"],
             mmr=int(player_row["mmr"]),
             preferred_role=player_row["preferred_role"],
             updated_at=player_row["updated_at"],
@@ -620,6 +676,20 @@ class Database:
             FROM players p
             JOIN player_role_mmr prm ON prm.discord_id = p.discord_id
             JOIN (
+                SELECT discord_id, COUNT(*) AS games_played
+                FROM match_mmr_changes
+                GROUP BY discord_id
+            ) stats ON stats.discord_id = p.discord_id
+            """
+        ).fetchall()
+
+    def list_player_rating_rows(self) -> list[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT p.discord_id, p.display_name, p.mmr,
+                   COALESCE(stats.games_played, 0) AS games_played
+            FROM players p
+            LEFT JOIN (
                 SELECT discord_id, COUNT(*) AS games_played
                 FROM match_mmr_changes
                 GROUP BY discord_id
@@ -732,7 +802,6 @@ class Database:
         team_b_avg = _avg_mmr(team_b_payload)
 
         team_by_player_id: dict[int, str] = {}
-        assigned_role_by_player_id: dict[int, str] = {}
         for team_name, payload in (("Team A", team_a_payload), ("Team B", team_b_payload)):
             for entry in payload:
                 try:
@@ -742,13 +811,6 @@ class Database:
                 if discord_id <= 0:
                     continue
                 team_by_player_id[discord_id] = team_name
-                assigned_role_by_player_id[discord_id] = str(entry.get("assigned_role", "")).strip().lower()
-
-        role_column_map = {
-            "tank": "tank_mmr",
-            "dps": "dps_mmr",
-            "support": "support_mmr",
-        }
         now = utc_now_iso()
         adjusted_rows = 0
 
@@ -792,6 +854,7 @@ class Database:
                     """,
                     (discord_id,),
                 ).fetchone()
+                player_after = desired_mmr_after
                 if player_row is not None:
                     player_after = self._clamp_sr(int(player_row["mmr"]) + correction)
                     self.conn.execute(
@@ -814,50 +877,14 @@ class Database:
                     (now, discord_id),
                 )
 
-                role_column = role_column_map.get(assigned_role_by_player_id.get(discord_id, ""))
-                if role_column is not None:
-                    role_row = self.conn.execute(
-                        f"""
-                        SELECT {role_column}
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    if role_row is not None:
-                        role_after = self._clamp_sr(int(role_row[role_column]) + correction)
-                        self.conn.execute(
-                            f"""
-                            UPDATE player_role_mmr
-                            SET {role_column} = ?, updated_at = ?
-                            WHERE discord_id = ?
-                            """,
-                            (role_after, now, discord_id),
-                        )
-                else:
-                    role_row_all = self.conn.execute(
-                        """
-                        SELECT tank_mmr, dps_mmr, support_mmr
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    if role_row_all is not None:
-                        self.conn.execute(
-                            """
-                            UPDATE player_role_mmr
-                            SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
-                            WHERE discord_id = ?
-                            """,
-                            (
-                                self._clamp_sr(int(role_row_all["tank_mmr"]) + correction),
-                                self._clamp_sr(int(role_row_all["dps_mmr"]) + correction),
-                                self._clamp_sr(int(role_row_all["support_mmr"]) + correction),
-                                now,
-                                discord_id,
-                            ),
-                        )
+                self.conn.execute(
+                    """
+                    UPDATE player_role_mmr
+                    SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
+                    WHERE discord_id = ?
+                    """,
+                    (player_after, player_after, player_after, now, discord_id),
+                )
 
                 self.conn.execute(
                     """
@@ -961,11 +988,6 @@ class Database:
 
         now = utc_now_iso()
         changes: list[MatchMmrChange] = []
-        role_column_map = {
-            "tank": "tank_mmr",
-            "dps": "dps_mmr",
-            "support": "support_mmr",
-        }
         prior_games: dict[int, int] = {}
         for payload in (team_a_payload, team_b_payload):
             for entry in payload:
@@ -996,8 +1018,6 @@ class Database:
 
                 display_name = str(entry.get("display_name", f"User {discord_id}"))
                 preferred_role = str(entry.get("preferred_role", self.default_role))
-                assigned_role = str(entry.get("assigned_role", "")).strip().lower()
-                role_column = role_column_map.get(assigned_role)
                 try:
                     seeded_mmr = self._clamp_sr(int(entry.get("mmr", self.default_mmr)))
                 except (TypeError, ValueError):
@@ -1016,10 +1036,10 @@ class Database:
                     mmr_before = seeded_mmr
                     self.conn.execute(
                         """
-                        INSERT INTO players (discord_id, display_name, battletag, mmr, preferred_role, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO players (discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (discord_id, display_name, None, mmr_before, preferred_role, now),
+                        (discord_id, display_name, None, None, mmr_before, preferred_role, now),
                     )
                     self.conn.execute(
                         """
@@ -1055,57 +1075,14 @@ class Database:
                     """,
                     (display_name, mmr_after, now, discord_id),
                 )
-                if role_column is not None:
-                    role_row = self.conn.execute(
-                        f"""
-                        SELECT {role_column}
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    role_before = mmr_before
-                    if role_row is not None:
-                        role_before = self._clamp_sr(int(role_row[role_column]))
-                    role_after = self._clamp_sr(role_before + delta)
-                    self.conn.execute(
-                        f"""
-                        UPDATE player_role_mmr
-                        SET {role_column} = ?, updated_at = ?
-                        WHERE discord_id = ?
-                        """,
-                        (role_after, now, discord_id),
-                    )
-                else:
-                    role_row_all = self.conn.execute(
-                        """
-                        SELECT tank_mmr, dps_mmr, support_mmr
-                        FROM player_role_mmr
-                        WHERE discord_id = ?
-                        """,
-                        (discord_id,),
-                    ).fetchone()
-                    tank_before = mmr_before
-                    dps_before = mmr_before
-                    support_before = mmr_before
-                    if role_row_all is not None:
-                        tank_before = self._clamp_sr(int(role_row_all["tank_mmr"]))
-                        dps_before = self._clamp_sr(int(role_row_all["dps_mmr"]))
-                        support_before = self._clamp_sr(int(role_row_all["support_mmr"]))
-                    self.conn.execute(
-                        """
-                        UPDATE player_role_mmr
-                        SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
-                        WHERE discord_id = ?
-                        """,
-                        (
-                            self._clamp_sr(tank_before + delta),
-                            self._clamp_sr(dps_before + delta),
-                            self._clamp_sr(support_before + delta),
-                            now,
-                            discord_id,
-                        ),
-                    )
+                self.conn.execute(
+                    """
+                    UPDATE player_role_mmr
+                    SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
+                    WHERE discord_id = ?
+                    """,
+                    (mmr_after, mmr_after, mmr_after, now, discord_id),
+                )
                 self.conn.execute(
                     """
                     INSERT INTO match_mmr_changes (match_id, discord_id, display_name, team, mmr_before, delta, mmr_after)
@@ -1349,7 +1326,7 @@ class Database:
     def get_active_match(self) -> ActiveMatch | None:
         row = self.conn.execute(
             """
-            SELECT match_id, channel_id, message_id, status, ready_deadline, started_at,
+            SELECT match_id, channel_id, message_id, status, map_name, ready_deadline, started_at,
                    team_a_voice_channel_id, team_b_voice_channel_id, escalated
             FROM active_match
             WHERE id = 1
@@ -1362,6 +1339,7 @@ class Database:
             channel_id=int(row["channel_id"]),
             message_id=int(row["message_id"]),
             status=row["status"],
+            map_name=row["map_name"],
             ready_deadline=row["ready_deadline"],
             started_at=row["started_at"],
             team_a_voice_channel_id=row["team_a_voice_channel_id"],
@@ -1376,6 +1354,7 @@ class Database:
         channel_id: int,
         message_id: int,
         status: str,
+        map_name: str | None = None,
         ready_deadline: str | None = None,
         started_at: str | None = None,
         team_a_voice_channel_id: int | None = None,
@@ -1388,15 +1367,16 @@ class Database:
             self.conn.execute(
                 """
                 INSERT INTO active_match (
-                    id, match_id, channel_id, message_id, status, ready_deadline, started_at,
+                    id, match_id, channel_id, message_id, status, map_name, ready_deadline, started_at,
                     team_a_voice_channel_id, team_b_voice_channel_id, escalated
                 )
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     match_id = excluded.match_id,
                     channel_id = excluded.channel_id,
                     message_id = excluded.message_id,
                     status = excluded.status,
+                    map_name = excluded.map_name,
                     ready_deadline = excluded.ready_deadline,
                     started_at = excluded.started_at,
                     team_a_voice_channel_id = excluded.team_a_voice_channel_id,
@@ -1408,6 +1388,7 @@ class Database:
                     channel_id,
                     message_id,
                     status,
+                    map_name,
                     ready_deadline,
                     started_at,
                     team_a_voice_channel_id,
@@ -1425,6 +1406,7 @@ class Database:
         *,
         status: str | None = None,
         message_id: int | None | object = _UNSET,
+        map_name: str | None | object = _UNSET,
         ready_deadline: str | None | object = _UNSET,
         started_at: str | None | object = _UNSET,
         team_a_voice_channel_id: int | None | object = _UNSET,
@@ -1443,6 +1425,7 @@ class Database:
                 UPDATE active_match
                 SET status = ?,
                     message_id = ?,
+                    map_name = ?,
                     ready_deadline = ?,
                     started_at = ?,
                     team_a_voice_channel_id = ?,
@@ -1453,6 +1436,7 @@ class Database:
                 (
                     next_status,
                     current.message_id if message_id is _UNSET else message_id,
+                    current.map_name if map_name is _UNSET else map_name,
                     current.ready_deadline if ready_deadline is _UNSET else ready_deadline,
                     current.started_at if started_at is _UNSET else started_at,
                     team_a_voice_channel_id
@@ -1491,7 +1475,7 @@ class Database:
         return QueueConfig(
             queue_channel_id=row["queue_channel_id"],
             queue_message_id=row["queue_message_id"],
-            queue_mode=row["queue_mode"],
+            queue_mode=DEFAULT_QUEUE_MODE,
             players_per_match=row["players_per_match"],
             tank_per_team=row["tank_per_team"],
             dps_per_team=row["dps_per_team"],
@@ -1533,7 +1517,7 @@ class Database:
                 WHERE id = 1
                 """,
                 (
-                    queue_mode if queue_mode is not None else current.queue_mode,
+                    DEFAULT_QUEUE_MODE,
                     players_per_match if players_per_match is not None else current.players_per_match,
                     tank_per_team if tank_per_team is not None else current.tank_per_team,
                     dps_per_team if dps_per_team is not None else current.dps_per_team,
@@ -1728,6 +1712,8 @@ class Database:
         ).fetchone()
 
     def upsert_queue_entry(self, discord_id: int, role: str) -> tuple[bool, str]:
+        _ = role
+        target_role = DEFAULT_QUEUE_ENTRY_ROLE
         existing = self.get_queue_entry(discord_id)
         if existing is None:
             with self.conn:
@@ -1736,12 +1722,12 @@ class Database:
                     INSERT INTO queue (discord_id, mode, role, queued_at)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (discord_id, DEFAULT_QUEUE_STATE_KEY, role, utc_now_iso()),
+                    (discord_id, DEFAULT_QUEUE_STATE_KEY, target_role, utc_now_iso()),
                 )
             return True, "joined"
 
-        if existing["role"] == role:
-            return False, "already in that queue role"
+        if existing["role"] == target_role:
+            return False, "already queued"
 
         with self.conn:
             self.conn.execute(
@@ -1751,9 +1737,9 @@ class Database:
                 WHERE discord_id = ?
                   AND mode = ?
                 """,
-                (role, discord_id, DEFAULT_QUEUE_STATE_KEY),
+                (target_role, discord_id, DEFAULT_QUEUE_STATE_KEY),
             )
-        return True, "role updated"
+        return True, "queue updated"
 
     def remove_queue_entry(self, discord_id: int) -> bool:
         with self.conn:
@@ -1837,6 +1823,7 @@ class Database:
             )
 
     def set_all_queue_roles(self, role: str) -> None:
+        _ = role
         with self.conn:
             self.conn.execute(
                 """
@@ -1844,20 +1831,11 @@ class Database:
                 SET role = ?
                 WHERE mode = ?
                 """,
-                (role, DEFAULT_QUEUE_STATE_KEY),
+                (DEFAULT_QUEUE_ENTRY_ROLE, DEFAULT_QUEUE_STATE_KEY),
             )
 
     def normalize_queue_roles_for_role_mode(self) -> None:
-        with self.conn:
-            self.conn.execute(
-                """
-                UPDATE queue
-                SET role = 'fill'
-                WHERE mode = ?
-                  AND role NOT IN ('tank', 'dps', 'support', 'fill')
-                """,
-                (DEFAULT_QUEUE_STATE_KEY,),
-            )
+        self._normalize_queue_entry_roles()
 
     def record_match(self, mode: str, team_a: Team, team_b: Team, roles_enforced: bool) -> int:
         now = utc_now_iso()
