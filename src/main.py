@@ -50,6 +50,7 @@ TEST_BOT_ID_BASE = 980_000_000_000_000_000
 RESULT_EMBED_TITLE_RE = re.compile(r"^Match #(\d+) Completed$")
 QUEUE_ENTRY_ROLE = "queue"
 MAP_POOL = [
+    # Control
     "Antarctic Peninsula",
     "Busan",
     "Ilios",
@@ -57,6 +58,7 @@ MAP_POOL = [
     "Nepal",
     "Oasis",
     "Samoa",
+    # Escort
     "Circuit Royal",
     "Dorado",
     "Havana",
@@ -65,6 +67,7 @@ MAP_POOL = [
     "Route 66",
     "Shambali Monastery",
     "Watchpoint: Gibraltar",
+    # Hybrid
     "Blizzard World",
     "Eichenwalde",
     "Hollywood",
@@ -72,13 +75,15 @@ MAP_POOL = [
     "Midtown",
     "Numbani",
     "Paraiso",
+    # Push
     "Colosseo",
     "Esperanca",
     "New Queen Street",
+    "Runasapi",
+    # Flashpoint
+    "Aatlis",
     "New Junk City",
     "Suravasa",
-    "Hanaoka",
-    "Throne of Anubis",
 ]
 HIGHEST_RANK_ALIAS_MAP = {
     "champion": "Champion",
