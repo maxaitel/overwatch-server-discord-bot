@@ -1,11 +1,23 @@
 from dataclasses import dataclass
 
+HIGHEST_RANK_TIERS = (
+    "Champion",
+    "Grandmaster",
+    "Master",
+    "Diamond",
+    "Plat",
+    "Gold",
+    "Silver",
+    "Bronze",
+)
+
 
 @dataclass(slots=True)
 class Player:
     discord_id: int
     display_name: str
     battletag: str | None
+    highest_rank: str | None
     mmr: int
     preferred_role: str
 
@@ -104,6 +116,7 @@ class PlayerStats:
     discord_id: int
     display_name: str
     battletag: str | None
+    highest_rank: str | None
     mmr: int
     preferred_role: str
     updated_at: str

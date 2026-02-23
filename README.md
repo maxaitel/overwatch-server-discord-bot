@@ -10,7 +10,10 @@ Button-driven inhouse/PUG queue with admin-only slash commands.
 - Players do not use slash commands. They only use buttons:
   - `Join Queue`
   - `Leave Queue`
-- On first queue join, the bot asks the player for BattleTag and stores it.
+- On first queue join, the bot asks the player for BattleTag and current highest rank (`Champion`, `Grandmaster`, `Master`, `Diamond`, `Plat`, `Gold`, `Silver`, `Bronze`) and stores both.
+  - Both fields are collected in the same popup modal, with rank as a dropdown.
+- If a player has one of those fields set but not the other, the bot asks only for the missing field on join.
+- Highest rank sets starter MMR: `Champion=4500`, `Grandmaster=4000`, `Master=3500`, `Diamond=3000`, `Plat=2500`, `Gold=2000`, `Silver=1500`, `Bronze=500`.
 - If a user sends a message in the queue channel, the bot keeps the message and reposts the queue panel with the same state so the panel stays at the bottom.
 - Modmail flow:
   - Users click `Open Ticket` on the modmail embed.

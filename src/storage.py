@@ -81,6 +81,7 @@ class Database:
                     discord_id INTEGER PRIMARY KEY,
                     display_name TEXT NOT NULL,
                     battletag TEXT,
+                    highest_rank TEXT,
                     mmr INTEGER NOT NULL,
                     preferred_role TEXT NOT NULL,
                     updated_at TEXT NOT NULL
@@ -258,6 +259,13 @@ class Database:
             for row in self.conn.execute("PRAGMA table_info(players)").fetchall()
         }
         with self.conn:
+            if "highest_rank" not in columns:
+                self.conn.execute(
+                    """
+                    ALTER TABLE players
+                    ADD COLUMN highest_rank TEXT
+                    """
+                )
             if "no_show_count" not in columns:
                 self.conn.execute(
                     """
@@ -433,12 +441,14 @@ class Database:
         discord_id: int,
         display_name: str,
         battletag: str | None = None,
+        highest_rank: str | None = None,
         mmr: int | None = None,
         preferred_role: str | None = None,
     ) -> None:
         now = utc_now_iso()
         current = self.get_player(discord_id)
         merged_battletag = battletag if battletag is not None else (current.battletag if current else None)
+        merged_highest_rank = highest_rank if highest_rank is not None else (current.highest_rank if current else None)
         merged_mmr_raw = mmr if mmr is not None else (current.mmr if current else self.default_mmr)
         merged_mmr = self._clamp_sr(int(merged_mmr_raw))
         merged_role = preferred_role if preferred_role is not None else (current.preferred_role if current else self.default_role)
@@ -446,16 +456,17 @@ class Database:
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO players (discord_id, display_name, battletag, mmr, preferred_role, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO players (discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(discord_id) DO UPDATE SET
                     display_name = excluded.display_name,
                     battletag = excluded.battletag,
+                    highest_rank = excluded.highest_rank,
                     mmr = excluded.mmr,
                     preferred_role = excluded.preferred_role,
                     updated_at = excluded.updated_at
                 """,
-                (discord_id, display_name, merged_battletag, merged_mmr, merged_role, now),
+                (discord_id, display_name, merged_battletag, merged_highest_rank, merged_mmr, merged_role, now),
             )
             self.conn.execute(
                 """
@@ -469,7 +480,7 @@ class Database:
     def get_player(self, discord_id: int) -> Player | None:
         row = self.conn.execute(
             """
-            SELECT discord_id, display_name, battletag, mmr, preferred_role
+            SELECT discord_id, display_name, battletag, highest_rank, mmr, preferred_role
             FROM players
             WHERE discord_id = ?
             """,
@@ -481,6 +492,7 @@ class Database:
             discord_id=row["discord_id"],
             display_name=row["display_name"],
             battletag=row["battletag"],
+            highest_rank=row["highest_rank"],
             mmr=row["mmr"],
             preferred_role=row["preferred_role"],
         )
@@ -604,7 +616,7 @@ class Database:
     def get_player_stats(self, discord_id: int) -> PlayerStats | None:
         player_row = self.conn.execute(
             """
-            SELECT discord_id, display_name, battletag, mmr, preferred_role, updated_at,
+            SELECT discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at,
                    no_show_count, disconnect_count
             FROM players
             WHERE discord_id = ?
@@ -639,6 +651,7 @@ class Database:
             discord_id=int(player_row["discord_id"]),
             display_name=player_row["display_name"],
             battletag=player_row["battletag"],
+            highest_rank=player_row["highest_rank"],
             mmr=int(player_row["mmr"]),
             preferred_role=player_row["preferred_role"],
             updated_at=player_row["updated_at"],
@@ -1023,10 +1036,10 @@ class Database:
                     mmr_before = seeded_mmr
                     self.conn.execute(
                         """
-                        INSERT INTO players (discord_id, display_name, battletag, mmr, preferred_role, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO players (discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (discord_id, display_name, None, mmr_before, preferred_role, now),
+                        (discord_id, display_name, None, None, mmr_before, preferred_role, now),
                     )
                     self.conn.execute(
                         """

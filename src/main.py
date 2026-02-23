@@ -14,7 +14,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .config import Settings, load_settings
 from .matchmaking import make_match
-from .models import AssignedPlayer, MatchMmrChange, ModmailConfig, ModmailTicket, QueueConfig, QueuedPlayer, Team
+from .models import (
+    AssignedPlayer,
+    HIGHEST_RANK_TIERS,
+    MatchMmrChange,
+    ModmailConfig,
+    ModmailTicket,
+    QueueConfig,
+    QueuedPlayer,
+    Team,
+)
 from .storage import Database
 
 
@@ -71,6 +80,30 @@ MAP_POOL = [
     "Hanaoka",
     "Throne of Anubis",
 ]
+HIGHEST_RANK_ALIAS_MAP = {
+    "champion": "Champion",
+    "grandmaster": "Grandmaster",
+    "grand master": "Grandmaster",
+    "gm": "Grandmaster",
+    "master": "Master",
+    "diamond": "Diamond",
+    "plat": "Plat",
+    "platinum": "Plat",
+    "gold": "Gold",
+    "silver": "Silver",
+    "bronze": "Bronze",
+}
+HIGHEST_RANK_STARTER_MMR = {
+    "Champion": 4500,
+    "Grandmaster": 4000,
+    "Master": 3500,
+    "Diamond": 3000,
+    "Plat": 2500,
+    "Gold": 2000,
+    "Silver": 1500,
+    "Bronze": 500,
+}
+HIGHEST_RANK_LIST = ", ".join(f"`{rank}`" for rank in HIGHEST_RANK_TIERS)
 
 
 def _utc_now_iso() -> str:
@@ -118,6 +151,21 @@ def _format_delta(delta: int) -> str:
     if delta > 0:
         return f"+{delta}"
     return str(delta)
+
+
+def _normalize_highest_rank(value: str | None) -> str | None:
+    if value is None:
+        return None
+    key = value.strip().lower()
+    if not key:
+        return None
+    return HIGHEST_RANK_ALIAS_MAP.get(key)
+
+
+def _starter_mmr_for_rank(rank: str | None) -> int | None:
+    if rank is None:
+        return None
+    return HIGHEST_RANK_STARTER_MMR.get(rank)
 
 
 def _load_font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -206,23 +254,63 @@ class MatchResultView(discord.ui.View):
         await self.bot.queue_service.handle_result_dispute(interaction)
 
 
-class BattleTagModal(discord.ui.Modal, title="Set BattleTag"):
-    battletag = discord.ui.TextInput(
-        label="BattleTag",
-        placeholder="Player#12345",
-        min_length=3,
-        max_length=32,
-        required=True,
-    )
-
-    def __init__(self, bot: OverwatchBot) -> None:
-        super().__init__(timeout=120)
+class QueueProfileModal(discord.ui.Modal, title="Complete Queue Profile"):
+    def __init__(
+        self,
+        bot: OverwatchBot,
+        *,
+        require_battletag: bool,
+        require_highest_rank: bool,
+    ) -> None:
+        super().__init__(timeout=180)
         self.bot = bot
+        self.require_battletag = require_battletag
+        self.require_highest_rank = require_highest_rank
+        self.battletag_input: discord.ui.TextInput | None = None
+        self.highest_rank_input: discord.ui.Select[QueueProfileModal] | None = None
+
+        if self.require_battletag:
+            self.battletag_input = discord.ui.TextInput(
+                label="BattleTag",
+                placeholder="Player#12345",
+                min_length=3,
+                max_length=32,
+                required=True,
+            )
+            self.add_item(self.battletag_input)
+
+        if self.require_highest_rank:
+            self.highest_rank_input = discord.ui.Select(
+                placeholder="Select your highest rank",
+                min_values=1,
+                max_values=1,
+                required=True,
+                options=[
+                    discord.SelectOption(
+                        label=rank,
+                        value=rank,
+                        description=f"Starter MMR {_starter_mmr_for_rank(rank)}",
+                    )
+                    for rank in HIGHEST_RANK_TIERS
+                ],
+            )
+            self.add_item(
+                discord.ui.Label(
+                    text="Highest Rank",
+                    description="Used to set your starter MMR",
+                    component=self.highest_rank_input,
+                )
+            )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.bot.queue_service.handle_join_after_battletag(
+        battletag = self.battletag_input.value.strip() if self.battletag_input is not None else None
+        highest_rank = None
+        if self.highest_rank_input is not None and self.highest_rank_input.values:
+            highest_rank = self.highest_rank_input.values[0]
+        await self.bot.queue_service.handle_join_after_profile(
             interaction,
-            battletag=str(self.battletag).strip(),
+            battletag=battletag,
+            highest_rank=highest_rank,
         )
 
 
@@ -647,6 +735,12 @@ class QueueService:
         if task and not task.done():
             task.cancel()
 
+    def _schedule_profile_reminder(self, interaction: discord.Interaction, user_id: int) -> None:
+        self._cancel_battletag_reminder(user_id)
+        self._battletag_reminder_tasks[user_id] = asyncio.create_task(
+            self._send_battletag_reminder(interaction, user_id)
+        )
+
     async def _send_battletag_reminder(self, interaction: discord.Interaction, user_id: int) -> None:
         try:
             await asyncio.sleep(12)
@@ -654,10 +748,10 @@ class QueueService:
             queued = self.bot.db.get_queue_entry(user_id)
             if queued is not None:
                 return
-            if player is not None and player.battletag:
+            if player is not None and player.battletag and player.highest_rank:
                 return
             await interaction.followup.send(
-                "BattleTag setup was cancelled. Press a join button again to enter queue.",
+                "Profile setup was cancelled. Press `Join Queue` again to finish setup and enter queue.",
                 ephemeral=True,
             )
         except asyncio.CancelledError:
@@ -1893,6 +1987,7 @@ class QueueService:
         interaction: discord.Interaction,
         *,
         battletag: str | None = None,
+        highest_rank: str | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=False)
         async with self.lock:
@@ -1913,10 +2008,24 @@ class QueueService:
             if battletag is not None:
                 trimmed = battletag.strip()
                 normalized_battletag = trimmed if trimmed else None
+
+            normalized_highest_rank = None
+            if highest_rank is not None:
+                normalized_highest_rank = _normalize_highest_rank(highest_rank)
+                if normalized_highest_rank is None:
+                    await interaction.followup.send(
+                        f"Invalid rank. Use one of: {HIGHEST_RANK_LIST}.",
+                        ephemeral=True,
+                    )
+                    return
+            starter_mmr = _starter_mmr_for_rank(normalized_highest_rank)
+
             self.bot.db.upsert_player(
                 discord_id=user_id,
                 display_name=interaction.user.display_name,
                 battletag=normalized_battletag,
+                highest_rank=normalized_highest_rank,
+                mmr=starter_mmr,
                 preferred_role=QUEUE_ENTRY_ROLE,
             )
 
@@ -1939,26 +2048,33 @@ class QueueService:
             await self.sync_panel()
             await interaction.followup.send(response_text, ephemeral=True)
 
-    async def handle_join_after_battletag(
+    async def handle_join_after_profile(
         self,
         interaction: discord.Interaction,
         *,
-        battletag: str,
+        battletag: str | None = None,
+        highest_rank: str | None = None,
     ) -> None:
         self._cancel_battletag_reminder(interaction.user.id)
         await self._handle_join_core(
             interaction,
             battletag=battletag,
+            highest_rank=highest_rank,
         )
 
     async def handle_join(self, interaction: discord.Interaction) -> None:
         player = self.bot.db.get_player(interaction.user.id)
-        if player is None or not player.battletag:
-            self._cancel_battletag_reminder(interaction.user.id)
-            await interaction.response.send_modal(BattleTagModal(self.bot))
-            self._battletag_reminder_tasks[interaction.user.id] = asyncio.create_task(
-                self._send_battletag_reminder(interaction, interaction.user.id)
+        missing_battletag = player is None or not player.battletag
+        missing_highest_rank = player is None or not player.highest_rank
+        if missing_battletag or missing_highest_rank:
+            await interaction.response.send_modal(
+                QueueProfileModal(
+                    self.bot,
+                    require_battletag=missing_battletag,
+                    require_highest_rank=missing_highest_rank,
+                )
             )
+            self._schedule_profile_reminder(interaction, interaction.user.id)
             return
         await self._handle_join_core(interaction)
 
@@ -2582,6 +2698,7 @@ def register_commands(bot: OverwatchBot) -> None:
                 f"DB ID: `{stats.discord_id}`\n"
                 f"Display Name: `{stats.display_name}`\n"
                 f"BattleTag: `{stats.battletag or 'not set'}`\n"
+                f"Highest Rank: `{stats.highest_rank or 'not set'}`\n"
                 f"MMR: `{stats.mmr}`"
             ),
             inline=False,
