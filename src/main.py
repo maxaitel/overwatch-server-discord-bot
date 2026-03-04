@@ -830,8 +830,10 @@ class QueueService:
         return ids
 
     def _required_report_votes(self, match_id: int) -> int:
-        _ = match_id
-        return MIN_REPORT_VOTES_TO_FINALIZE
+        player_count = len(self._match_player_ids_from_db(match_id))
+        if player_count <= 0:
+            return MIN_REPORT_VOTES_TO_FINALIZE
+        return min(MIN_REPORT_VOTES_TO_FINALIZE, player_count)
 
     def _reports_complete(self, match_id: int) -> bool:
         winner, _, is_tie = self.bot.db.resolve_match_report_winner(

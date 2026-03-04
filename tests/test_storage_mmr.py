@@ -559,6 +559,62 @@ class StorageMmrTests(unittest.TestCase):
         self.assertFalse(is_tie)
         self.assertEqual(winner, "Draw")
 
+    def test_match_report_votes_picks_unique_top_when_multiple_outcomes_meet_threshold(self) -> None:
+        match_id = self._record_custom_match(
+            team_a_players=[
+                (9401, "A1", 2500),
+                (9402, "A2", 2500),
+                (9403, "A3", 2500),
+                (9404, "A4", 2500),
+                (9405, "A5", 2500),
+                (9406, "A6", 2500),
+                (9407, "A7", 2500),
+            ],
+            team_b_players=[
+                (9501, "B1", 2500),
+                (9502, "B2", 2500),
+                (9503, "B3", 2500),
+                (9504, "B4", 2500),
+                (9505, "B5", 2500),
+                (9506, "B6", 2500),
+                (9507, "B7", 2500),
+            ],
+        )
+
+        for reporter_id, team, outcome in (
+            (9401, "Team A", "Team A"),
+            (9402, "Team A", "Team A"),
+            (9403, "Team A", "Team A"),
+            (9404, "Team A", "Team A"),
+            (9405, "Team A", "Team A"),
+            (9406, "Team A", "Team A"),
+            (9407, "Team A", "Team A"),
+            (9501, "Team B", "Team A"),
+            (9502, "Team B", "Team B"),
+            (9503, "Team B", "Team B"),
+            (9504, "Team B", "Team B"),
+            (9505, "Team B", "Team B"),
+            (9506, "Team B", "Team B"),
+            (9507, "Team B", "Team B"),
+        ):
+            changed, msg = self.db.upsert_match_report(
+                match_id=match_id,
+                team=team,
+                reported_winner_team=outcome,
+                reporter_id=reporter_id,
+            )
+            self.assertTrue(changed, msg)
+
+        totals = self.db.get_match_report_vote_totals(match_id)
+        self.assertEqual(totals["Team A"], 8)
+        self.assertEqual(totals["Team B"], 6)
+        self.assertEqual(totals["Draw"], 0)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 14)
+        self.assertFalse(is_tie)
+        self.assertEqual(winner, "Team A")
+
 
 if __name__ == "__main__":
     unittest.main()

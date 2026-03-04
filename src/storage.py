@@ -1356,14 +1356,16 @@ class Database:
         total_votes = sum(totals.values())
 
         required = max(int(required_votes), 1)
-        qualified = [team for team, votes in totals.items() if votes >= required]
-        if len(qualified) != 1:
-            if len(qualified) > 1:
-                return None, total_votes, True
+        max_votes = max(totals.values()) if totals else 0
+        if max_votes < required:
             if totals["Team A"] > 0 and totals["Team A"] == totals["Team B"]:
                 return None, total_votes, True
             return None, total_votes, False
-        return qualified[0], total_votes, False
+
+        leaders = [team for team, votes in totals.items() if votes == max_votes]
+        if len(leaders) != 1:
+            return None, total_votes, True
+        return leaders[0], total_votes, False
 
     def set_match_ready(self, match_id: int, discord_id: int) -> tuple[bool, str]:
         existing = self.conn.execute(
