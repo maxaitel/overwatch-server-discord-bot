@@ -225,6 +225,7 @@ class ActiveMatchView(discord.ui.View):
         if reports_locked:
             self.we_won.disabled = True
             self.we_lost.disabled = True
+            self.draw.disabled = True
         if not captain_claim_enabled:
             self.remove_item(self.claim_captain)
 
@@ -235,6 +236,10 @@ class ActiveMatchView(discord.ui.View):
     @discord.ui.button(label="We Lost", style=discord.ButtonStyle.secondary, custom_id="active_match_we_lost", row=0)
     async def we_lost(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
         await self.bot.queue_service.handle_match_report(interaction, report_type="loss")
+
+    @discord.ui.button(label="Draw", style=discord.ButtonStyle.primary, custom_id="active_match_draw", row=0)
+    async def draw(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
+        await self.bot.queue_service.handle_match_report(interaction, report_type="draw")
 
     @discord.ui.button(
         label="Claim Captain",
@@ -825,10 +830,8 @@ class QueueService:
         return ids
 
     def _required_report_votes(self, match_id: int) -> int:
-        player_count = len(self._match_player_ids_from_db(match_id))
-        if player_count <= 0:
-            return MIN_REPORT_VOTES_TO_FINALIZE
-        return min(MIN_REPORT_VOTES_TO_FINALIZE, player_count)
+        _ = match_id
+        return MIN_REPORT_VOTES_TO_FINALIZE
 
     def _reports_complete(self, match_id: int) -> bool:
         winner, _, is_tie = self.bot.db.resolve_match_report_winner(
@@ -1808,6 +1811,8 @@ class QueueService:
                 reported_winner = player_team
             elif report_type == "loss":
                 reported_winner = "Team B" if player_team == "Team A" else "Team A"
+            elif report_type == "draw":
+                reported_winner = "Draw"
             else:
                 await interaction.followup.send("Invalid report type.", ephemeral=True)
                 return
@@ -1830,15 +1835,16 @@ class QueueService:
             vote_totals = self.bot.db.get_match_report_vote_totals(active.match_id)
 
             if resolved_winner is None:
-                remaining_votes = max(required_votes - total_votes, 0)
+                strongest_outcome_votes = max(vote_totals.values()) if vote_totals else 0
+                remaining_votes = max(required_votes - strongest_outcome_votes, 0)
                 tally_text = (
                     f"Current tally: Team A `{vote_totals['Team A']}` | "
                     f"Team B `{vote_totals['Team B']}` | Draw `{vote_totals['Draw']}`."
                 )
                 if is_tie:
-                    status_text = "Threshold reached, but there is no strict majority yet. More votes are needed."
+                    status_text = "Vote is split (50/50 Team A vs Team B). Neither team is trusted yet."
                 else:
-                    status_text = f"Need `{remaining_votes}` more vote(s) to reach `{required_votes}` total."
+                    status_text = f"Need `{remaining_votes}` more vote(s) for one outcome to reach `{required_votes}`."
                 self._active_match_updates[active.match_id] = (
                     f"Latest vote by <@{interaction.user.id}>: `{reported_winner}`.\n"
                     f"{tally_text}\n"

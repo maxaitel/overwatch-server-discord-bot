@@ -429,8 +429,86 @@ class StorageMmrTests(unittest.TestCase):
 
         winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
         self.assertEqual(total_votes, 6)
-        self.assertTrue(is_tie)
+        self.assertFalse(is_tie)
         self.assertIsNone(winner)
+
+    def test_match_report_votes_need_six_for_same_outcome(self) -> None:
+        match_id = self._record_custom_match(
+            team_a_players=[
+                (7001, "A1", 2500),
+                (7002, "A2", 2500),
+                (7003, "A3", 2500),
+                (7004, "A4", 2500),
+                (7005, "A5", 2500),
+            ],
+            team_b_players=[
+                (8001, "B1", 2500),
+                (8002, "B2", 2500),
+                (8003, "B3", 2500),
+                (8004, "B4", 2500),
+                (8005, "B5", 2500),
+            ],
+        )
+        for reporter_id in (7001, 7002, 7003, 7004, 7005):
+            changed, msg = self.db.upsert_match_report(
+                match_id=match_id,
+                team="Team A",
+                reported_winner_team="Team A",
+                reporter_id=reporter_id,
+            )
+            self.assertTrue(changed, msg)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 5)
+        self.assertFalse(is_tie)
+        self.assertIsNone(winner)
+
+        changed, msg = self.db.upsert_match_report(
+            match_id=match_id,
+            team="Team B",
+            reported_winner_team="Team A",
+            reporter_id=8001,
+        )
+        self.assertTrue(changed, msg)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 6)
+        self.assertFalse(is_tie)
+        self.assertEqual(winner, "Team A")
+
+    def test_match_report_votes_draw_can_win_with_six_votes(self) -> None:
+        match_id = self._record_custom_match(
+            team_a_players=[
+                (9001, "A1", 2500),
+                (9002, "A2", 2500),
+                (9003, "A3", 2500),
+            ],
+            team_b_players=[
+                (9101, "B1", 2500),
+                (9102, "B2", 2500),
+                (9103, "B3", 2500),
+            ],
+        )
+        for reporter_id, team in (
+            (9001, "Team A"),
+            (9002, "Team A"),
+            (9003, "Team A"),
+            (9101, "Team B"),
+            (9102, "Team B"),
+            (9103, "Team B"),
+        ):
+            changed, msg = self.db.upsert_match_report(
+                match_id=match_id,
+                team=team,
+                reported_winner_team="Draw",
+                reporter_id=reporter_id,
+            )
+            self.assertTrue(changed, msg)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 6)
+        self.assertFalse(is_tie)
+        self.assertEqual(winner, "Draw")
 
 
 if __name__ == "__main__":
