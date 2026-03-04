@@ -1842,7 +1842,7 @@ class QueueService:
                     f"Team B `{vote_totals['Team B']}` | Draw `{vote_totals['Draw']}`."
                 )
                 if is_tie:
-                    status_text = "Vote is split (50/50 Team A vs Team B). Neither team is trusted yet."
+                    status_text = "Vote is split with no trusted winner yet."
                 else:
                     status_text = f"Need `{remaining_votes}` more vote(s) for one outcome to reach `{required_votes}`."
                 self._active_match_updates[active.match_id] = (

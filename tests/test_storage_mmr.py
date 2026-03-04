@@ -510,6 +510,55 @@ class StorageMmrTests(unittest.TestCase):
         self.assertFalse(is_tie)
         self.assertEqual(winner, "Draw")
 
+    def test_match_report_votes_draw_wins_even_if_team_a_and_b_tied_below_threshold(self) -> None:
+        match_id = self._record_custom_match(
+            team_a_players=[
+                (9201, "A1", 2500),
+                (9202, "A2", 2500),
+                (9203, "A3", 2500),
+                (9204, "A4", 2500),
+                (9205, "A5", 2500),
+            ],
+            team_b_players=[
+                (9301, "B1", 2500),
+                (9302, "B2", 2500),
+                (9303, "B3", 2500),
+                (9304, "B4", 2500),
+                (9305, "B5", 2500),
+            ],
+        )
+
+        votes = [
+            (9201, "Team A", "Team A"),
+            (9202, "Team A", "Team A"),
+            (9301, "Team B", "Team B"),
+            (9302, "Team B", "Team B"),
+            (9203, "Team A", "Draw"),
+            (9204, "Team A", "Draw"),
+            (9205, "Team A", "Draw"),
+            (9303, "Team B", "Draw"),
+            (9304, "Team B", "Draw"),
+            (9305, "Team B", "Draw"),
+        ]
+        for reporter_id, team, outcome in votes:
+            changed, msg = self.db.upsert_match_report(
+                match_id=match_id,
+                team=team,
+                reported_winner_team=outcome,
+                reporter_id=reporter_id,
+            )
+            self.assertTrue(changed, msg)
+
+        totals = self.db.get_match_report_vote_totals(match_id)
+        self.assertEqual(totals["Team A"], 2)
+        self.assertEqual(totals["Team B"], 2)
+        self.assertEqual(totals["Draw"], 6)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 10)
+        self.assertFalse(is_tie)
+        self.assertEqual(winner, "Draw")
+
 
 if __name__ == "__main__":
     unittest.main()

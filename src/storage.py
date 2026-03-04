@@ -1354,13 +1354,15 @@ class Database:
     def resolve_match_report_winner(self, match_id: int, *, required_votes: int) -> tuple[str | None, int, bool]:
         totals = self.get_match_report_vote_totals(match_id)
         total_votes = sum(totals.values())
-        if totals["Team A"] > 0 and totals["Team A"] == totals["Team B"]:
-            return None, total_votes, True
 
         required = max(int(required_votes), 1)
         qualified = [team for team, votes in totals.items() if votes >= required]
         if len(qualified) != 1:
-            return None, total_votes, (len(qualified) > 1)
+            if len(qualified) > 1:
+                return None, total_votes, True
+            if totals["Team A"] > 0 and totals["Team A"] == totals["Team B"]:
+                return None, total_votes, True
+            return None, total_votes, False
         return qualified[0], total_votes, False
 
     def set_match_ready(self, match_id: int, discord_id: int) -> tuple[bool, str]:
