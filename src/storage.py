@@ -58,6 +58,7 @@ class Database:
         self._ensure_player_columns()
         self._ensure_queue_config_columns()
         self._ensure_active_match_columns()
+        self._ensure_match_report_votes_table()
         self._ensure_modmail_config_columns()
         self._normalize_queue_state()
         self._ensure_queue_config_row()
@@ -193,6 +194,19 @@ class Database:
                     reporter_id INTEGER NOT NULL,
                     reported_at TEXT NOT NULL,
                     PRIMARY KEY (match_id, team),
+                    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS match_report_votes (
+                    match_id INTEGER NOT NULL,
+                    reporter_id INTEGER NOT NULL,
+                    reporter_team TEXT NOT NULL,
+                    reported_winner_team TEXT NOT NULL,
+                    reported_at TEXT NOT NULL,
+                    PRIMARY KEY (match_id, reporter_id),
                     FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
                 )
                 """
@@ -337,6 +351,41 @@ class Database:
                     """
                 )
 
+    def _ensure_match_report_votes_table(self) -> None:
+        with self.conn:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS match_report_votes (
+                    match_id INTEGER NOT NULL,
+                    reporter_id INTEGER NOT NULL,
+                    reporter_team TEXT NOT NULL,
+                    reported_winner_team TEXT NOT NULL,
+                    reported_at TEXT NOT NULL,
+                    PRIMARY KEY (match_id, reporter_id),
+                    FOREIGN KEY (match_id) REFERENCES matches(id) ON DELETE CASCADE
+                )
+                """
+            )
+            # Backfill legacy one-report-per-team rows into per-player vote storage.
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO match_report_votes (
+                    match_id,
+                    reporter_id,
+                    reporter_team,
+                    reported_winner_team,
+                    reported_at
+                )
+                SELECT
+                    match_id,
+                    reporter_id,
+                    team,
+                    reported_winner_team,
+                    reported_at
+                FROM match_reports
+                """
+            )
+
     def _ensure_queue_config_row(self) -> None:
         with self.conn:
             self.conn.execute(
@@ -476,6 +525,61 @@ class Database:
                 """,
                 (discord_id, merged_mmr, merged_mmr, merged_mmr, now),
             )
+
+    def set_player_mmr(self, *, discord_id: int, mmr: int, display_name: str | None = None) -> tuple[int, bool]:
+        clamped_mmr = self._clamp_sr(int(mmr))
+        now = utc_now_iso()
+        row = self.conn.execute(
+            """
+            SELECT display_name, preferred_role
+            FROM players
+            WHERE discord_id = ?
+            """,
+            (discord_id,),
+        ).fetchone()
+        created = row is None
+        resolved_display_name = (
+            display_name
+            if display_name is not None and display_name.strip()
+            else (str(row["display_name"]) if row is not None else f"User {discord_id}")
+        )
+        resolved_role = str(row["preferred_role"]) if row is not None else self.default_role
+
+        with self.conn:
+            if created:
+                self.conn.execute(
+                    """
+                    INSERT INTO players (discord_id, display_name, battletag, highest_rank, mmr, preferred_role, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (discord_id, resolved_display_name, None, None, clamped_mmr, resolved_role, now),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    UPDATE players
+                    SET display_name = ?, mmr = ?, updated_at = ?
+                    WHERE discord_id = ?
+                    """,
+                    (resolved_display_name, clamped_mmr, now, discord_id),
+                )
+            self.conn.execute(
+                """
+                INSERT INTO player_role_mmr (discord_id, tank_mmr, dps_mmr, support_mmr, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(discord_id) DO NOTHING
+                """,
+                (discord_id, clamped_mmr, clamped_mmr, clamped_mmr, now),
+            )
+            self.conn.execute(
+                """
+                UPDATE player_role_mmr
+                SET tank_mmr = ?, dps_mmr = ?, support_mmr = ?, updated_at = ?
+                WHERE discord_id = ?
+                """,
+                (clamped_mmr, clamped_mmr, clamped_mmr, now, discord_id),
+            )
+        return clamped_mmr, created
 
     def get_player(self, discord_id: int) -> Player | None:
         row = self.conn.execute(
@@ -819,12 +923,6 @@ class Database:
                 discord_id = existing.discord_id
                 team_name = team_by_player_id.get(discord_id, existing.team)
                 opponent_avg = team_b_avg if team_name == "Team A" else team_a_avg
-                if winner_team == "Draw":
-                    score = 0.5
-                else:
-                    score = 1.0 if winner_team == team_name else 0.0
-
-                expected = self._expected_score(existing.mmr_before, opponent_avg)
                 prior_games_row = self.conn.execute(
                     """
                     SELECT COUNT(*) AS games_played
@@ -838,7 +936,12 @@ class Database:
                 multiplier = 1.0
                 if calibration_matches > 0 and calibration_multiplier > 1.0 and prior_games < calibration_matches:
                     multiplier = calibration_multiplier
-                desired_delta = int(round(k_factor * (score - expected) * multiplier))
+                if winner_team == "Draw":
+                    desired_delta = 0
+                else:
+                    score = 1.0 if winner_team == team_name else 0.0
+                    expected = self._expected_score(existing.mmr_before, opponent_avg)
+                    desired_delta = int(round(k_factor * (score - expected) * multiplier))
                 existing_effective_delta = int(existing.mmr_after) - int(existing.mmr_before)
                 desired_mmr_after = self._clamp_sr(int(existing.mmr_before) + desired_delta)
                 desired_effective_delta = desired_mmr_after - int(existing.mmr_before)
@@ -979,13 +1082,6 @@ class Database:
         team_a_avg = _avg_mmr(team_a_payload)
         team_b_avg = _avg_mmr(team_b_payload)
 
-        if winner_team == "Draw":
-            score_a = 0.5
-            score_b = 0.5
-        else:
-            score_a = 1.0 if winner_team == "Team A" else 0.0
-            score_b = 1.0 if winner_team == "Team B" else 0.0
-
         now = utc_now_iso()
         changes: list[MatchMmrChange] = []
         prior_games: dict[int, int] = {}
@@ -1060,12 +1156,15 @@ class Database:
                         (discord_id, mmr_before, mmr_before, mmr_before, now),
                     )
 
-                expected = self._expected_score(mmr_before, opponent_avg)
                 multiplier = 1.0
                 if calibration_matches > 0 and calibration_multiplier > 1.0:
                     if prior_games.get(discord_id, 0) < calibration_matches:
                         multiplier = calibration_multiplier
-                delta = int(round(k_factor * (score - expected) * multiplier))
+                if winner_team == "Draw":
+                    delta = 0
+                else:
+                    expected = self._expected_score(mmr_before, opponent_avg)
+                    delta = int(round(k_factor * (score - expected) * multiplier))
                 mmr_after = self._clamp_sr(mmr_before + delta)
                 self.conn.execute(
                     """
@@ -1103,6 +1202,8 @@ class Database:
                 )
 
         with self.conn:
+            score_a = 1.0 if winner_team == "Team A" else 0.0
+            score_b = 1.0 if winner_team == "Team B" else 0.0
             _apply_team("Team A", team_a_payload, score_a, team_b_avg)
             _apply_team("Team B", team_b_payload, score_b, team_a_avg)
 
@@ -1159,14 +1260,21 @@ class Database:
 
     def clear_match_reports(self, match_id: int) -> int:
         with self.conn:
-            result = self.conn.execute(
+            result_votes = self.conn.execute(
+                """
+                DELETE FROM match_report_votes
+                WHERE match_id = ?
+                """,
+                (match_id,),
+            )
+            self.conn.execute(
                 """
                 DELETE FROM match_reports
                 WHERE match_id = ?
                 """,
                 (match_id,),
             )
-        return result.rowcount
+        return result_votes.rowcount
 
     def upsert_match_report(
         self,
@@ -1183,47 +1291,81 @@ class Database:
         now = utc_now_iso()
         existing = self.conn.execute(
             """
-            SELECT reported_winner_team, reporter_id
-            FROM match_reports
+            SELECT reported_winner_team
+            FROM match_report_votes
             WHERE match_id = ?
-              AND team = ?
+              AND reporter_id = ?
             """,
-            (match_id, team),
+            (match_id, reporter_id),
         ).fetchone()
-        if (
-            existing is not None
-            and existing["reported_winner_team"] == reported_winner_team
-            and int(existing["reporter_id"]) == reporter_id
-        ):
+        if existing is not None and existing["reported_winner_team"] == reported_winner_team:
             return False, "report already submitted"
-        if existing is not None and int(existing["reporter_id"]) != reporter_id:
-            return False, "your team already has a report from another teammate"
         result_message = "report updated" if existing is not None else "report saved"
 
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO match_reports (match_id, team, reported_winner_team, reporter_id, reported_at)
+                INSERT INTO match_report_votes (
+                    match_id,
+                    reporter_id,
+                    reporter_team,
+                    reported_winner_team,
+                    reported_at
+                )
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(match_id, team) DO UPDATE SET
+                ON CONFLICT(match_id, reporter_id) DO UPDATE SET
+                    reporter_team = excluded.reporter_team,
                     reported_winner_team = excluded.reported_winner_team,
-                    reporter_id = excluded.reporter_id,
                     reported_at = excluded.reported_at
                 """,
-                (match_id, team, reported_winner_team, reporter_id, now),
+                (match_id, reporter_id, team, reported_winner_team, now),
             )
         return True, result_message
 
-    def get_match_reports(self, match_id: int) -> dict[str, sqlite3.Row]:
+    def get_match_reports(self, match_id: int) -> dict[int, sqlite3.Row]:
         rows = self.conn.execute(
             """
-            SELECT team, reported_winner_team, reporter_id, reported_at
-            FROM match_reports
+            SELECT reporter_id, reporter_team, reported_winner_team, reported_at
+            FROM match_report_votes
             WHERE match_id = ?
+            ORDER BY reported_at ASC, reporter_id ASC
             """,
             (match_id,),
         ).fetchall()
-        return {row["team"]: row for row in rows}
+        return {int(row["reporter_id"]): row for row in rows}
+
+    def get_match_report_vote_totals(self, match_id: int) -> dict[str, int]:
+        rows = self.conn.execute(
+            """
+            SELECT reported_winner_team, COUNT(*) AS votes
+            FROM match_report_votes
+            WHERE match_id = ?
+            GROUP BY reported_winner_team
+            """,
+            (match_id,),
+        ).fetchall()
+        totals = {"Team A": 0, "Team B": 0, "Draw": 0}
+        for row in rows:
+            team = str(row["reported_winner_team"])
+            if team in totals:
+                totals[team] = int(row["votes"])
+        return totals
+
+    def resolve_match_report_winner(self, match_id: int, *, required_votes: int) -> tuple[str | None, int, bool]:
+        totals = self.get_match_report_vote_totals(match_id)
+        total_votes = sum(totals.values())
+
+        required = max(int(required_votes), 1)
+        max_votes = max(totals.values()) if totals else 0
+        if max_votes < required:
+            if totals["Team A"] > 0 and totals["Team A"] == totals["Team B"]:
+                return None, total_votes, True
+            return None, total_votes, False
+
+        leaders = [team for team, votes in totals.items() if votes == max_votes]
+        if len(leaders) != 1:
+            return None, total_votes, True
+        return leaders[0], total_votes, False
 
     def set_match_ready(self, match_id: int, discord_id: int) -> tuple[bool, str]:
         existing = self.conn.execute(

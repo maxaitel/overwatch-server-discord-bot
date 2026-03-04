@@ -85,6 +85,7 @@ MAP_POOL = [
     "New Junk City",
     "Suravasa",
 ]
+MIN_REPORT_VOTES_TO_FINALIZE = 6
 HIGHEST_RANK_ALIAS_MAP = {
     "champion": "Champion",
     "grandmaster": "Grandmaster",
@@ -224,6 +225,7 @@ class ActiveMatchView(discord.ui.View):
         if reports_locked:
             self.we_won.disabled = True
             self.we_lost.disabled = True
+            self.draw.disabled = True
         if not captain_claim_enabled:
             self.remove_item(self.claim_captain)
 
@@ -234,6 +236,10 @@ class ActiveMatchView(discord.ui.View):
     @discord.ui.button(label="We Lost", style=discord.ButtonStyle.secondary, custom_id="active_match_we_lost", row=0)
     async def we_lost(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
         await self.bot.queue_service.handle_match_report(interaction, report_type="loss")
+
+    @discord.ui.button(label="Draw", style=discord.ButtonStyle.primary, custom_id="active_match_draw", row=0)
+    async def draw(self, interaction: discord.Interaction, _: discord.ui.Button[ActiveMatchView]) -> None:
+        await self.bot.queue_service.handle_match_report(interaction, report_type="draw")
 
     @discord.ui.button(
         label="Claim Captain",
@@ -735,6 +741,30 @@ class QueueService:
         self._leaderboard_message_id: int | None = None
         self._battletag_reminder_tasks: dict[int, asyncio.Task[None]] = {}
 
+    async def _clear_queue_panel_message(
+        self,
+        *,
+        config: QueueConfig | None = None,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        cfg = config or self.bot.db.get_queue_config()
+        message_id = cfg.queue_message_id or 0
+        if message_id <= 0:
+            return
+        active = self.bot.db.get_active_match()
+        if active is not None and active.message_id == message_id:
+            self.bot.db.clear_queue_message()
+            return
+        if channel is None:
+            channel = await self.resolve_queue_channel(cfg)
+        if channel is not None:
+            try:
+                existing = await channel.fetch_message(message_id)
+                await existing.delete()
+            except discord.DiscordException:
+                pass
+        self.bot.db.clear_queue_message()
+
     def _cancel_battletag_reminder(self, discord_id: int) -> None:
         task = self._battletag_reminder_tasks.pop(discord_id, None)
         if task and not task.done():
@@ -799,9 +829,18 @@ class QueueService:
                 ids.append(discord_id)
         return ids
 
+    def _required_report_votes(self, match_id: int) -> int:
+        player_count = len(self._match_player_ids_from_db(match_id))
+        if player_count <= 0:
+            return MIN_REPORT_VOTES_TO_FINALIZE
+        return min(MIN_REPORT_VOTES_TO_FINALIZE, player_count)
+
     def _reports_complete(self, match_id: int) -> bool:
-        reports = self.bot.db.get_match_reports(match_id)
-        return "Team A" in reports and "Team B" in reports
+        winner, _, is_tie = self.bot.db.resolve_match_report_winner(
+            match_id,
+            required_votes=self._required_report_votes(match_id),
+        )
+        return winner is not None and not is_tie
 
     def _match_player_ids_from_db(self, match_id: int) -> list[int]:
         teams = self.bot.db.get_match_teams(match_id)
@@ -1011,16 +1050,28 @@ class QueueService:
         }.get(active.status, active.status)
         reports = self.bot.db.get_match_reports(active.match_id)
         report_count = len(reports)
+        required_votes = self._required_report_votes(active.match_id)
+        vote_totals = self.bot.db.get_match_report_vote_totals(active.match_id)
 
         embed = discord.Embed(
             title=f"Active Match #{active.match_id}",
             description=(
                 f"Phase: `{status_label}`\n"
-                f"Players: `{len(all_player_ids)}` | Reports: `{report_count}/1`"
+                f"Players: `{len(all_player_ids)}` | Votes: `{report_count}/{required_votes}`"
             ),
             color=discord.Color.orange() if active.status == "waiting_vc" else discord.Color.green(),
         )
         embed.timestamp = datetime.now(timezone.utc)
+        if active.status in {"live", "disputed"}:
+            embed.add_field(
+                name="Result Votes",
+                value=(
+                    f"Team A: `{vote_totals['Team A']}`\n"
+                    f"Team B: `{vote_totals['Team B']}`\n"
+                    f"Draw: `{vote_totals['Draw']}`"
+                ),
+                inline=False,
+            )
         embed.add_field(
             name="Voice Channels",
             value=(
@@ -1283,7 +1334,7 @@ class QueueService:
 
         return embed
 
-    async def _sync_active_match_message(self) -> None:
+    async def _sync_active_match_message(self, *, repost: bool = False) -> None:
         active = self.bot.db.get_active_match()
         if active is None:
             return
@@ -1300,13 +1351,27 @@ class QueueService:
             reports_locked=reports_locked,
             captain_claim_enabled=captain_claim_enabled,
         )
+        default_content = "Active match panel"
 
         try:
             message = await channel.fetch_message(active.message_id)
-            await message.edit(embed=embed, view=view)
+            if repost:
+                content = message.content or default_content
+                try:
+                    await message.delete()
+                except discord.DiscordException:
+                    pass
+                message = await channel.send(
+                    content=content,
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+                self.bot.db.update_active_match(message_id=message.id)
+            else:
+                await message.edit(embed=embed, view=view)
         except discord.NotFound:
-            content = "Active match panel"
-            message = await channel.send(content=content, embed=embed, view=view)
+            message = await channel.send(content=default_content, embed=embed, view=view)
             self.bot.db.update_active_match(message_id=message.id)
         except discord.DiscordException as exc:
             logger.warning("Unable to sync active match message: %s", exc)
@@ -1748,6 +1813,8 @@ class QueueService:
                 reported_winner = player_team
             elif report_type == "loss":
                 reported_winner = "Team B" if player_team == "Team A" else "Team A"
+            elif report_type == "draw":
+                reported_winner = "Draw"
             else:
                 await interaction.followup.send("Invalid report type.", ephemeral=True)
                 return
@@ -1762,10 +1829,39 @@ class QueueService:
                 await interaction.followup.send(msg, ephemeral=True)
                 return
 
-            await self._finalize_active_match(active.match_id, reported_winner)
+            required_votes = self._required_report_votes(active.match_id)
+            resolved_winner, total_votes, is_tie = self.bot.db.resolve_match_report_winner(
+                active.match_id,
+                required_votes=required_votes,
+            )
+            vote_totals = self.bot.db.get_match_report_vote_totals(active.match_id)
+
+            if resolved_winner is None:
+                strongest_outcome_votes = max(vote_totals.values()) if vote_totals else 0
+                remaining_votes = max(required_votes - strongest_outcome_votes, 0)
+                tally_text = (
+                    f"Current tally: Team A `{vote_totals['Team A']}` | "
+                    f"Team B `{vote_totals['Team B']}` | Draw `{vote_totals['Draw']}`."
+                )
+                if is_tie:
+                    status_text = "Vote is split with no trusted winner yet."
+                else:
+                    status_text = f"Need `{remaining_votes}` more vote(s) for one outcome to reach `{required_votes}`."
+                self._active_match_updates[active.match_id] = (
+                    f"Latest vote by <@{interaction.user.id}>: `{reported_winner}`.\n"
+                    f"{tally_text}\n"
+                    f"{status_text}"
+                )
+                await self._sync_active_match_message()
+                await interaction.followup.send(f"{msg.capitalize()}. {tally_text} {status_text}", ephemeral=True)
+                return
+
+            await self._finalize_active_match(active.match_id, resolved_winner)
             await interaction.followup.send(
                 (
-                    f"Result submitted. Match finalized as `{reported_winner}`. "
+                    f"{msg.capitalize()}. Match finalized as `{resolved_winner}` "
+                    f"with `{total_votes}` votes (Team A `{vote_totals['Team A']}`, "
+                    f"Team B `{vote_totals['Team B']}`, Draw `{vote_totals['Draw']}`). "
                     "If this is incorrect, press `Dispute Winner` on the result message."
                 ),
                 ephemeral=True,
@@ -1845,6 +1941,11 @@ class QueueService:
 
     async def sync_panel(self, *, repost: bool = False) -> None:
         config = self.bot.db.get_queue_config()
+        active = self.bot.db.get_active_match()
+        if active is not None:
+            channel = await self.resolve_queue_channel(config)
+            await self._clear_queue_panel_message(config=config, channel=channel)
+            return
         channel = await self.resolve_queue_channel(config)
         if channel is None:
             return
@@ -1916,6 +2017,7 @@ class QueueService:
         channel = await self.resolve_queue_channel(config)
         if channel is None:
             return
+        await self._clear_queue_panel_message(config=config, channel=channel)
 
         team_a_ids = [player.discord_id for player in result.team_a.players]
         team_b_ids = [player.discord_id for player in result.team_b.players]
@@ -2156,6 +2258,22 @@ class QueueService:
             await self.sync_panel()
             return removed
 
+    async def admin_set_player_mmr(
+        self,
+        *,
+        discord_id: int,
+        mmr: int,
+        display_name: str | None = None,
+    ) -> tuple[int, bool]:
+        async with self.lock:
+            applied_mmr, created = self.bot.db.set_player_mmr(
+                discord_id=discord_id,
+                mmr=mmr,
+                display_name=display_name,
+            )
+            await self.sync_leaderboard_image(force=True)
+            return applied_mmr, created
+
     async def admin_force_result(self, match_id: int, winner_team: str) -> tuple[bool, str]:
         async with self.lock:
             previous_winner = self.bot.db.get_match_result(match_id)
@@ -2379,6 +2497,11 @@ class QueueService:
         if self._reposting:
             return
         async with self.lock:
+            active = self.bot.db.get_active_match()
+            if active is not None:
+                if active.channel_id == _message.channel.id:
+                    await self._sync_active_match_message(repost=True)
+                return
             await self.sync_panel(repost=True)
 
 
@@ -2635,6 +2758,58 @@ def register_commands(bot: OverwatchBot) -> None:
             await interaction.followup.send(f"Removed {player.mention} from queue.", ephemeral=True)
         else:
             await interaction.followup.send(f"{player.mention} is not in queue.", ephemeral=True)
+
+    @bot.tree.command(name="player_set_mmr", description="Set a player's MMR.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(player="Player to update", mmr="New MMR (0-5000)")
+    async def player_set_mmr(interaction: discord.Interaction, player: discord.User, mmr: int) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        applied_mmr, created = await bot.queue_service.admin_set_player_mmr(
+            discord_id=player.id,
+            mmr=mmr,
+            display_name=player.display_name,
+        )
+        action = "created" if created else "updated"
+        await interaction.followup.send(
+            f"Player {player.mention} {action}. MMR set to `{applied_mmr}`.",
+            ephemeral=True,
+        )
+
+    @bot.tree.command(name="player_set_mmr_id", description="Set a player's MMR using raw Discord ID.")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(player_id="Discord user ID", mmr="New MMR (0-5000)", display_name="Optional display name")
+    async def player_set_mmr_id(
+        interaction: discord.Interaction,
+        player_id: str,
+        mmr: int,
+        display_name: str | None = None,
+    ) -> None:
+        if not _is_admin(interaction):
+            await interaction.response.send_message("You do not have permission to run this command.", ephemeral=True)
+            return
+        try:
+            target_id = int(player_id.strip())
+        except ValueError:
+            await interaction.response.send_message("player_id must be a valid integer Discord ID.", ephemeral=True)
+            return
+        if target_id <= 0:
+            await interaction.response.send_message("player_id must be a positive integer Discord ID.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=False)
+        applied_mmr, created = await bot.queue_service.admin_set_player_mmr(
+            discord_id=target_id,
+            mmr=mmr,
+            display_name=display_name,
+        )
+        action = "created" if created else "updated"
+        await interaction.followup.send(
+            f"Player `{target_id}` {action}. MMR set to `{applied_mmr}`.",
+            ephemeral=True,
+        )
 
     @bot.tree.command(name="player_stats", description="Show stored DB stats for a player.")
     @app_commands.default_permissions(manage_guild=True)
