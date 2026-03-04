@@ -398,6 +398,40 @@ class StorageMmrTests(unittest.TestCase):
         self.assertTrue(is_tie)
         self.assertIsNone(winner)
 
+    def test_match_report_votes_plurality_without_majority_does_not_finalize(self) -> None:
+        match_id = self._record_custom_match(
+            team_a_players=[
+                (5001, "A1", 2500),
+                (5002, "A2", 2500),
+                (5003, "A3", 2500),
+            ],
+            team_b_players=[
+                (6001, "B1", 2500),
+                (6002, "B2", 2500),
+                (6003, "B3", 2500),
+            ],
+        )
+        for reporter_id, team, reported_winner in (
+            (5001, "Team A", "Team A"),
+            (5002, "Team A", "Team A"),
+            (5003, "Team A", "Team A"),
+            (6001, "Team B", "Team B"),
+            (6002, "Team B", "Team B"),
+            (6003, "Team B", "Draw"),
+        ):
+            changed, msg = self.db.upsert_match_report(
+                match_id=match_id,
+                team=team,
+                reported_winner_team=reported_winner,
+                reporter_id=reporter_id,
+            )
+            self.assertTrue(changed, msg)
+
+        winner, total_votes, is_tie = self.db.resolve_match_report_winner(match_id, required_votes=6)
+        self.assertEqual(total_votes, 6)
+        self.assertTrue(is_tie)
+        self.assertIsNone(winner)
+
 
 if __name__ == "__main__":
     unittest.main()

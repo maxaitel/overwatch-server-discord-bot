@@ -1359,8 +1359,8 @@ class Database:
 
         best_team = max(totals, key=lambda team: totals[team])
         best_votes = totals[best_team]
-        top_ties = [team for team, votes in totals.items() if votes == best_votes and votes > 0]
-        if len(top_ties) != 1:
+        # Require strict majority after threshold is reached (not just plurality).
+        if best_votes <= (total_votes / 2):
             return None, total_votes, True
         return best_team, total_votes, False
 

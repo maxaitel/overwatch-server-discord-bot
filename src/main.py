@@ -1836,7 +1836,7 @@ class QueueService:
                     f"Team B `{vote_totals['Team B']}` | Draw `{vote_totals['Draw']}`."
                 )
                 if is_tie:
-                    status_text = "Vote is tied at the threshold. More votes are needed for a clear majority."
+                    status_text = "Threshold reached, but there is no strict majority yet. More votes are needed."
                 else:
                     status_text = f"Need `{remaining_votes}` more vote(s) to reach `{required_votes}` total."
                 self._active_match_updates[active.match_id] = (
